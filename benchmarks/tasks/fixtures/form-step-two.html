@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Profile step two</title></head>
+<body>
+  <main>
+    <h1>Location</h1>
+    <p id="name-summary"></p>
+    <p id="city-summary"></p>
+    <label for="region">Region</label>
+    <select id="region" name="region">
+      <option value="" disabled selected>Select a region</option>
+      <option value="north">North</option>
+      <option value="south">South</option>
+    </select>
+    <button id="submit" type="button">Submit profile</button>
+  </main>
+  <script>
+    const incoming = new URLSearchParams(location.search);
+    document.querySelector("#name-summary").textContent = incoming.get("name") || "";
+    document.querySelector("#city-summary").textContent = incoming.get("city") || "";
+    document.querySelector("#submit").addEventListener("click", () => {
+      const region = document.querySelector("#region").value;
+      const outgoing = new URLSearchParams({
+        name: incoming.get("name") || "",
+        city: incoming.get("city") || "",
+        region,
+      });
+      window.location.href = `/submitted.html?${outgoing}`;
+    });
+  </script>
+</body>
+</html>

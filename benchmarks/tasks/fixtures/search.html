@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Catalog search</title>
+</head>
+<body>
+  <main>
+    <h1>Catalog search</h1>
+    <form id="search-form">
+      <label for="query">Search catalog</label>
+      <input id="query" name="query" type="search" maxlength="40">
+      <button type="submit">Search</button>
+    </form>
+    <ul id="results">
+      <li><a href="/items/boreal.html">Boreal</a></li>
+      <li><a href="/items/aurora.html">Aurora</a></li>
+      <li><a href="/items/coral.html">Coral</a></li>
+    </ul>
+  </main>
+  <script>
+    document.querySelector("#search-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const query = document.querySelector("#query").value.trim().toLowerCase();
+      for (const item of document.querySelectorAll("#results li")) {
+        item.hidden = !item.textContent.toLowerCase().includes(query);
+      }
+    });
+  </script>
+</body>
+</html>

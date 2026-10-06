@@ -1,4 +1,4 @@
-from .models import ActionExecution
+from .models import ActionExecution, ActionRequest
 from .playwright_executor import PlaywrightExecutor
 
-__all__ = ["ActionExecution", "PlaywrightExecutor"]
+__all__ = ["ActionExecution", "ActionRequest", "PlaywrightExecutor"]

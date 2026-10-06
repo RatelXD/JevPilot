@@ -2,14 +2,19 @@
   "schema_version": 1,
   "prepared_on": "2026-10-06",
   "repository": "RatelXD/JevPilot",
-  "repository_upload_status": "pending_binary_upload",
+  "repository_upload_status": "uploaded",
   "package_contains_originals": true,
+  "upload_note": "사용자가 지정한 assets의 DOCX/PDF를 변환 없이 업로드했다. DOCX는 이전 문서 패키지의 기록과 바이트가 다르므로 이전 메타데이터를 보존한다. source-review.md의 원본 검토 기록은 이전 파일 기준이며 이번 DOCX의 내용 검토를 의미하지 않는다.",
   "files": [
     {
       "original_filename": "JevPilot_개인프로젝트_제안서_및_발표자료_Brief.docx",
       "path": "docs/proposal/jevpilot-proposal-and-brief.docx",
-      "size_bytes": 45668,
-      "sha256": "fcb0fba97803290d12550556ed83e4a8f8765e505af704ed385d8b6d1cc21479"
+      "size_bytes": 41815,
+      "sha256": "947992f68884119b4e506c35f53251cf6e1a544e8b27c145f0fe9f28eb389467",
+      "previous_package_metadata": {
+        "size_bytes": 45668,
+        "sha256": "fcb0fba97803290d12550556ed83e4a8f8765e505af704ed385d8b6d1cc21479"
+      }
     },
     {
       "original_filename": "JevPilot 프로젝트 제안_발표자료.pdf",

@@ -2,26 +2,41 @@
 
 JevPilot는 LLM과 Jev를 사용해 브라우저 작업을 수행합니다. 목표는 작업 성공률을 유지하면서 LLM-only보다 실행 시간과 비용을 줄이는 것입니다. 이 결과는 반복 실험으로 확인합니다. AI 코딩 도구의 사용을 허용합니다. 변경 이유와 검증 결과를 남깁니다.
 
-## 1. 작업 흐름
+## 1. 브랜치 전략과 작업 흐름
 
-`main`을 기준 브랜치로 사용하며 별도의 `develop` 브랜치는 두지 않습니다.
+`main`은 유일한 장기 브랜치입니다. `develop` 브랜치는 만들지 않습니다.
+`main`에는 통합이 끝난 변경만 둡니다.
 
-| 변경 유형 | 권장 방식 |
-| --- | --- |
-| 오탈자, 링크, 동작에 영향 없는 작은 문서 수정 | 소유자가 확인 후 `main`에 직접 커밋 가능 |
-| 기능 추가, 동작 변경, 여러 파일에 걸친 수정 | 작업 브랜치에서 개발 후 PR 권장 |
-| 모델 연동, fallback, 임계값, 실행·검증 로직, 측정 방식 변경 | 변경 근거와 테스트를 남기는 PR 권장 |
-| 외부 기여 | fork 또는 권한 있는 작업 브랜치에서 PR 제출 |
+모든 작업은 최신 `main`에서 만든 짧은 작업 branch에서 합니다. Branch 이름은
+목적을 나타냅니다.
 
-이슈 작성은 선택 사항입니다. 간단한 작업은 PR 본문만으로 설명해도 됩니다. 저장소의 브랜치 보호 규칙이 설정되어 있다면 해당 규칙을 우선하며, 이를 우회하지 않습니다.
+- `feat/<topic>`: 새 기능
+- `fix/<topic>`: 오류 수정
+- `docs/<topic>`: 문서 변경
+- `test/<topic>`: 테스트 변경
+- `chore/<topic>`: 의존성 또는 유지보수 변경
 
-브랜치는 `feat/jev-provider`, `fix/run-metrics`, `docs/contributing`, `test/fallback`처럼 목적을 드러내는 이름을 사용합니다. 하나의 브랜치와 PR에는 가능하면 하나의 변경 목적만 담습니다.
+한 branch에는 한 가지 목적만 담습니다. 작업 내용을 `main`에 바로 commit하지
+않습니다. 통합은 merge commit을 기본으로 하며 개별 commit을 보존합니다.
+협업과 외부 기여에는 PR(pull request)을 사용합니다. PR에는 변경 이유와 검증
+결과를 기록합니다. 소유자가 직접 통합을 요청한 경우, 검증된 작업 branch를
+별도 reviewer 없이 merge할 수 있습니다.
+
+GitHub branch protection 규칙이 있으면 그 규칙을 우선하고 우회하지 않습니다.
+공유 branch의 commit을 rebase, amend, force-push로 다시 쓰지 않습니다.
 
 ```bash
 git switch main
-git pull --ff-only
+git pull --ff-only origin main
 git switch -c feat/jev-provider
+# 파일을 수정하고 검사를 실행한 뒤 commit합니다.
+git switch main
+git pull --ff-only origin main
+git merge --no-ff feat/jev-provider
+git push origin main
 ```
+
+Issue 작성은 선택 사항입니다. Branch와 PR 제목은 변경 목적을 분명히 나타냅니다.
 
 ## 2. 개발 환경과 검증
 

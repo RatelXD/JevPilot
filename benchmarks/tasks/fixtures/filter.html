@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Catalog filters</title>
+</head>
+<body>
+  <main>
+    <h1>Catalog filters</h1>
+    <label for="region">Region</label>
+    <select id="region">
+      <option value="" disabled selected>Select a region</option>
+      <option value="north">North</option>
+      <option value="south">South</option>
+    </select>
+    <button id="apply">Apply filters</button>
+    <ul id="results">
+      <li data-region="south"><a href="/items/boreal.html?region=south">Boreal</a></li>
+      <li data-region="north"><a href="/items/aurora.html?region=north">Aurora</a></li>
+      <li data-region="south"><a href="/items/coral.html?region=south">Coral</a></li>
+    </ul>
+  </main>
+  <script>
+    document.querySelector("#apply").addEventListener("click", () => {
+      const region = document.querySelector("#region").value;
+      for (const item of document.querySelectorAll("#results li")) {
+        item.hidden = item.dataset.region !== region;
+      }
+    });
+  </script>
+</body>
+</html>

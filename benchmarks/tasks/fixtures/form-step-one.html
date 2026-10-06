@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Profile step one</title></head>
+<body>
+  <main>
+    <h1>Profile</h1>
+    <label for="full-name">Full name</label>
+    <input id="full-name" name="full-name" type="text" maxlength="50">
+    <label for="city">City</label>
+    <input id="city" name="city" type="text" maxlength="50">
+    <button id="continue" type="button">Continue</button>
+  </main>
+  <script>
+    document.querySelector("#continue").addEventListener("click", () => {
+      const name = document.querySelector("#full-name").value;
+      const city = document.querySelector("#city").value;
+      const params = new URLSearchParams({name, city});
+      window.location.href = `/form-step-two.html?${params}`;
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Catalog autocomplete</title></head>
+<body>
+  <main>
+    <h1>Catalog autocomplete</h1>
+    <label for="query">Search catalog</label>
+    <input id="query" type="search" maxlength="40">
+    <ul id="suggestions" role="listbox" hidden>
+      <li><button role="option" type="button">Aurora</button></li>
+    </ul>
+  </main>
+  <script>
+    let suggestionTimer;
+    document.querySelector("#query").addEventListener("input", () => {
+      clearTimeout(suggestionTimer);
+      document.querySelector("#suggestions").hidden = true;
+      suggestionTimer = setTimeout(() => {
+        const query = document.querySelector("#query").value.trim().toLowerCase();
+        if (query === "aurora") {
+          document.querySelector("#suggestions").hidden = false;
+        }
+      }, 40);
+    });
+    document.querySelector("[role='option']").addEventListener("click", () => {
+      window.location.href = "/items/aurora.html";
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Catalog combined filters</title></head>
+<body>
+  <main>
+    <h1>Catalog combined filters</h1>
+    <label for="region">Region</label>
+    <select id="region">
+      <option value="" disabled selected>Select a region</option>
+      <option value="north">North</option>
+      <option value="south">South</option>
+    </select>
+    <label for="free"><input id="free" type="checkbox"> Free cancellation</label>
+    <button id="apply" type="button">Apply filters</button>
+    <ul id="results">
+      <li data-region="south" data-free="true">
+        <a href="/items/boreal.html?region=south&amp;free=true">Boreal</a>
+      </li>
+      <li data-region="north" data-free="true">
+        <a href="/items/aurora.html?region=north&amp;free=true">Aurora</a>
+      </li>
+      <li data-region="north" data-free="false">
+        <a href="/items/coral.html?region=north&amp;free=false">Coral</a>
+      </li>
+    </ul>
+  </main>
+  <script>
+    document.querySelector("#apply").addEventListener("click", () => {
+      const region = document.querySelector("#region").value;
+      const free = document.querySelector("#free").checked;
+      for (const item of document.querySelectorAll("#results li")) {
+        item.hidden =
+          item.dataset.region !== region ||
+          (free && item.dataset.free !== "true");
+      }
+    });
+  </script>
+</body>
+</html>

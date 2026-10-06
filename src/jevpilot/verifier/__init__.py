@@ -1,4 +1,4 @@
 from .models import VerificationResult
-from .verifiers import TextEqualsVerifier
+from .verifiers import IndependentVerifier, TaskBinding
 
-__all__ = ["VerificationResult", "TextEqualsVerifier"]
+__all__ = ["VerificationResult", "IndependentVerifier", "TaskBinding"]

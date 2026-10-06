@@ -1,0 +1,1 @@
+"""Local browser benchmark tasks."""

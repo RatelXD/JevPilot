@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "prepared_on": "2026-10-06",
+  "repository": "RatelXD/JevPilot",
+  "repository_upload_status": "pending_binary_upload",
+  "package_contains_originals": true,
+  "files": [
+    {
+      "original_filename": "JevPilot_개인프로젝트_제안서_및_발표자료_Brief.docx",
+      "path": "docs/proposal/jevpilot-proposal-and-brief.docx",
+      "size_bytes": 45668,
+      "sha256": "fcb0fba97803290d12550556ed83e4a8f8765e505af704ed385d8b6d1cc21479"
+    },
+    {
+      "original_filename": "JevPilot 프로젝트 제안_발표자료.pdf",
+      "path": "docs/presentation/jevpilot-proposal-slides.pdf",
+      "size_bytes": 1070101,
+      "sha256": "d3aa231cef76d209fc688ed73f1c720eba19ddcb922b90ea9388be9d77f0400c"
+    }
+  ]
+}

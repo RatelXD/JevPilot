@@ -28,6 +28,9 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/jevpilot"]
 
+[tool.basedpyright]
+extraPaths = ["src"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

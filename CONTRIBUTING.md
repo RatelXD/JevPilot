@@ -55,7 +55,7 @@ Windows PowerShell에서는 가상환경 활성화 명령으로 `.venv\Scripts\A
 uv run pytest -q
 ```
 
-로컬 task를 실제 LLM과 Jev로 실행하려면 각 명령에 `--live`를 지정합니다. `JEVPILOT_LLM_PROVIDER`는 Chosun Gateway의 `gateway` 또는 ChatGPT 구독 인증의 `codex_subscription`입니다. API 키를 쓰는 Gateway 실행은 크레딧을 소비하고, 구독 실행은 내부 호출 수와 비용이 제공되지 않을 수 있습니다.
+로컬 task를 실제 LLM과 Jev로 실행하려면 각 명령에 `--live`를 지정합니다. `JEVPILOT_LLM_PROVIDER`는 Chosun Gateway의 `gateway` 또는 공식 Codex 로그인을 사용하는 `chatgpt-subscription`입니다. API 키를 쓰는 Gateway 실행은 크레딧을 소비하고, 구독 실행은 내부 호출 수와 비용이 제공되지 않을 수 있습니다.
 
 사용자 task 명령 예:
 

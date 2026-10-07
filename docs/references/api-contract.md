@@ -92,9 +92,10 @@ the product CLI has no JevPilot-imposed cost cap. Report Gateway spending in
 credits and leave USD unknown unless the provider supplies a verified amount.
 
 The user also requires a selectable ChatGPT subscription path for the final
-project demo. `codex_subscription` uses Codex's existing login and must never
-receive the Gateway or Jev API key. The Codex subscription login is not
-verified.
+project demo. `chatgpt-subscription` delegates browser sign-in and credential
+refresh to the official Codex CLI in JevPilot's isolated `~/.jevpilot/codex`
+profile. It must never receive the Gateway or Jev API key. Complete the official
+login once with `jevpilot shell` and `/login`.
 
 Live Gateway evidence:
 

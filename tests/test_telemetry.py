@@ -102,7 +102,7 @@ def test_subscription_invocation_does_not_invent_http_count_or_cost() -> None:
     recorder.record_call(CallEvent(
         run_id=recorder.run_id, call_id="sub-1", logical_call_id="logical-1",
         source="subscription_cli", role="planner", purpose="initial",
-        provider="codex_subscription", request_model="configured-model",
+        provider="chatgpt-subscription", request_model="configured-model",
         attempt_index=1, sent=False, invoked=True,
         started_at=now, ended_at=now, outcome="succeeded",
     ))

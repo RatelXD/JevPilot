@@ -1,8 +1,8 @@
-from collections.abc import AsyncIterator
 import os
-from pathlib import Path
 import subprocess
 import sys
+from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 from playwright.async_api import Browser, Route, async_playwright
@@ -131,9 +131,13 @@ def test_cli_rejects_product_mock_mode() -> None:
         )
 
 
-def test_live_user_cli_fails_before_invocation_when_model_is_unset() -> None:
+def test_live_user_cli_fails_before_invocation_when_model_is_unset(
+    tmp_path: Path,
+) -> None:
     # Given
     environment = os.environ.copy()
+    environment["HOME"] = str(tmp_path)
+    _ = environment.pop("CODEX_HOME", None)
     for name in (
         "JEVPILOT_LLM_MODEL",
         "JEVPILOT_LLM_PROVIDER",
@@ -177,3 +181,26 @@ def test_live_user_cli_fails_before_invocation_when_model_is_unset() -> None:
     assert result.returncode == 2
     assert "JEVPILOT_LLM_MODEL must be set" in result.stderr
     assert "Run artifacts written" not in result.stdout
+
+
+def test_shell_command_runs_exit_command_in_isolated_home(tmp_path: Path) -> None:
+    # Given
+    environment = os.environ.copy()
+    environment["HOME"] = str(tmp_path)
+    _ = environment.pop("CODEX_HOME", None)
+
+    # When
+    result = subprocess.run(
+        (sys.executable, "-m", "jevpilot", "shell"),
+        cwd=ROOT,
+        env=environment,
+        input="/exit\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    # Then
+    assert result.returncode == 0
+    assert "jevpilot>" in result.stdout

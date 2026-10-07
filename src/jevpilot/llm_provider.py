@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import StrEnum
-import os
 from typing import assert_never, final
 
 from jevpilot.codex_client import CodexClient
@@ -17,7 +17,7 @@ class LLMProvider(StrEnum):
     """Supported LLM account paths."""
 
     CHOSUN_GATEWAY = "gateway"
-    CODEX_SUBSCRIPTION = "codex_subscription"
+    CODEX_SUBSCRIPTION = "chatgpt-subscription"
 
 
 @final
@@ -30,7 +30,7 @@ class LLMClientSelection:
 
     async def aclose(self) -> None:
         """Close only provider transports that own a persistent resource."""
-        match self.client:  # noqa: MATCH_OK — basedpyright proves the union exhaustive
+        match self.client:
             case GatewayModelClient():
                 await self.client.aclose()
                 return
@@ -39,22 +39,27 @@ class LLMClientSelection:
         assert_never(self.client)
 
 
-async def select_llm_client() -> LLMClientSelection:
+async def select_llm_client(
+    *, provider: LLMProvider | None = None
+) -> LLMClientSelection:
     """Build one selected provider without falling back between accounts."""
-    raw_provider = os.getenv(
-        "JEVPILOT_LLM_PROVIDER", LLMProvider.CHOSUN_GATEWAY
-    ).strip()
-    try:
-        provider = LLMProvider(raw_provider)
-    except ValueError:
-        raise ProviderError(
-            kind="configuration",
-            call_id="llm-provider",
-            retryable=False,
-            message="JEVPILOT_LLM_PROVIDER must be gateway or codex_subscription",
-        ) from None
+    if provider is None:
+        raw_provider = os.getenv(
+            "JEVPILOT_LLM_PROVIDER", LLMProvider.CHOSUN_GATEWAY
+        ).strip()
+        try:
+            selected_provider = LLMProvider(raw_provider)
+        except ValueError:
+            raise ProviderError(
+                kind="configuration",
+                call_id="llm-provider",
+                retryable=False,
+                message="JEVPILOT_LLM_PROVIDER must be gateway or chatgpt-subscription",
+            ) from None
+    else:
+        selected_provider = provider
 
-    match provider:  # noqa: MATCH_OK — basedpyright proves the enum exhaustive
+    match selected_provider:
         case LLMProvider.CHOSUN_GATEWAY:
             api_key = os.getenv("JEVPILOT_LLM_API_KEY", "").strip()
             if not api_key:
@@ -68,9 +73,9 @@ async def select_llm_client() -> LLMClientSelection:
                 api_key=api_key,
                 privacy_policy=PrivacyPolicy(),
             )
-            return LLMClientSelection(provider=provider, client=client)
+            return LLMClientSelection(provider=selected_provider, client=client)
         case LLMProvider.CODEX_SUBSCRIPTION:
             client = CodexClient(privacy=PrivacyPolicy())
             await client.verify_subscription_login()
-            return LLMClientSelection(provider=provider, client=client)
-    assert_never(provider)
+            return LLMClientSelection(provider=selected_provider, client=client)
+    assert_never(selected_provider)

@@ -45,7 +45,7 @@ uv run --env-file .env jevpilot run \
 
 각 실행은 새 브라우저 context를 사용합니다. 기본적으로 시작 URL의 origin만
 허용합니다. 추가 origin은 `--allow-origin`으로 각각 지정합니다. 허용하지
-않은 origin으로 가는 요청은 차단합니다. 개인 로그인 프로필, 로그인 흐름,
+않은 origin으로 가는 요청은 차단합니다. 작업 대상 사이트의 개인 로그인 흐름,
 결제, 삭제, 외부 메시지 전송은 현재 지원 범위가 아닙니다.
 
 ## LLM과 Jev 설정
@@ -53,7 +53,7 @@ uv run --env-file .env jevpilot run \
 `JEVPILOT_LLM_PROVIDER`로 LLM 실행 경로를 선택합니다.
 
 - `gateway`: Chosun University API Gateway를 통해 여러 모델을 사용합니다.
-- `codex_subscription`: Codex CLI를 통해 ChatGPT 구독 인증을 사용합니다.
+- `chatgpt-subscription`: 공식 Codex CLI 로그인으로 ChatGPT 구독 모델을 사용합니다.
 
 Gateway를 사용할 때는 Gateway 키와 Jev 키를 로컬 `.env`에 둡니다. Gateway
 키는 Codex 하위 프로세스에 전달하지 않습니다.
@@ -70,8 +70,33 @@ JEVPILOT_JEV_TARGET_THRESHOLD=0.5
 
 현재 TypeSafe는 `jev-latest`를 `jev-1.13.0`으로 해석합니다. 응답의 실제 모델
 ID를 trace에 기록합니다. 별칭은 이후 다른 모델을 가리킬 수 있습니다.
-`codex_subscription`을 사용할 때는 먼저 `codex login`을 실행합니다.
-Gateway에서 사용할 수 있는 모델은 계정에 따라 다릅니다.
+
+ChatGPT 구독 로그인과 모델 선택:
+
+```bash
+uv run jevpilot shell
+/login
+/model
+```
+
+`/login`은 공식 `codex login`을 사용하고 OAuth 주소를 터미널에 표시합니다.
+자동으로 Chromium을 열지 않습니다. Windows 브라우저에서 주소를 열고 인증을 마친 뒤
+터미널로 돌아옵니다. Codex는 인증 정보를 `~/.jevpilot/codex`에 저장합니다.
+JevPilot는 `~/.codex`에서 인증 정보를 복사하거나 토큰을 읽지 않습니다.
+`/model`은 로그인한 Codex 프로필의 표시 가능한 모델을 조회하고
+`chatgpt-subscription/<model-id>` 형식으로 선택합니다. 선택은
+`~/.jevpilot/settings.json`에 저장하고 다음 `jevpilot run`에서 사용합니다.
+선택과 함께 계정이 보고한 추론 강도 및 Fast 지원 상태도 저장합니다.
+`/model` 목록은 지원하는 추론 강도와 Fast 여부를 표시합니다.
+프롬프트 입력창에서 `Shift+Tab`을 누르면 현재 입력 문자열과 커서를 보존한 채
+추론 강도가 바뀝니다. 프롬프트 입력 중 `Shift+Tab`은 입력 문장을 보존하며 지원되는
+`low → medium → high → xhigh → max` 순으로 순환합니다. `/fast`, `/fast on`,
+`/fast off`로 현재 모델의 Fast service tier를 전환합니다. Fast는 계정
+카탈로그가 해당 모델을 지원한다고 보고한 경우에만 켤 수 있습니다.
+headless 실행에서 `gateway`를 명시하면 환경변수 모델 설정을 사용해 저장된 구독 선택을
+무시합니다. `chatgpt-subscription`은 저장 모델을 우선하고, 선택이 없으면 환경 모델을
+사용합니다. 모델 목록은 선택 후보이며 실제 모델 접근은 첫 inference 요청으로 확인됩니다.
+저장된 모델이 현재 계정 카탈로그에서 사라지면 실행 전에 선택을 다시 요구합니다.
 
 uv는 `.env`를 자동으로 읽지 않습니다. 명령에 `--env-file .env`를 지정하거나
 환경변수를 직접 주입합니다. `.env`는 Git에서 제외하고 권한을 `600`으로

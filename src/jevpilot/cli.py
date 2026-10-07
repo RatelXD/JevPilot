@@ -1,31 +1,40 @@
 """User-facing CLI for bounded same-origin browser tasks."""
 
-from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 import os
-from pathlib import Path
 import sys
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 import anyio
-import hashlib
 from playwright.async_api import async_playwright
 from pydantic import ValidationError
 
 from jevpilot.cli_config import (
+    USAGE,
     CliError,
     UserRunConfig,
-    USAGE,
     create_user_config,
     parse_options,
 )
+from jevpilot.codex_client import CodexClient, CodexModelClientAdapter
 from jevpilot.decision import JevDecisionProvider, LLMDecisionProvider
-from jevpilot.llm_provider import select_llm_client
-from jevpilot.model_client import ProviderError
+from jevpilot.interactive import run_shell
+from jevpilot.llm_provider import LLMProvider, select_llm_client
+from jevpilot.model_catalog import list_chatgpt_models
+from jevpilot.model_client import ProviderError, StructuredModelClient
+from jevpilot.model_selection import (
+    ModelSelectionError,
+    ModelSelection,
+    load_model_selection,
+    save_model_selection,
+)
 from jevpilot.planner import LLMPlannerProvider
 from jevpilot.privacy import PrivacyPolicy
 from jevpilot.runtime import HybridBrowserAgent
-from jevpilot.telemetry.models import ExecutionTrace
 from jevpilot.telemetry.call_reporting import report_jev_call
+from jevpilot.telemetry.models import ExecutionTrace
 from jevpilot.telemetry.recorder import RunRecorder
 from jevpilot.text import LLMTextValueProvider
 from jevpilot.user_task import build_user_task
@@ -56,23 +65,77 @@ def _required_setting(key: str) -> str:
 
 async def _run(config: UserRunConfig) -> ExecutionTrace:
     task, binding = build_user_task(config)
-    llm_model = _required_setting("JEVPILOT_LLM_MODEL")
-    selection = await select_llm_client()
+    configured_provider = os.getenv("JEVPILOT_LLM_PROVIDER", "").strip()
+    saved_model = (
+        load_model_selection()
+        if configured_provider in {"", "chatgpt-subscription"}
+        else None
+    )
+    if saved_model is None:
+        llm_model = _required_setting("JEVPILOT_LLM_MODEL")
+        provider = None
+    else:
+        llm_model = saved_model.model_id
+        provider = LLMProvider.CODEX_SUBSCRIPTION
+    selection = await select_llm_client(provider=provider)
     selector: JevDecisionProvider | LLMDecisionProvider | None = None
     try:
+        if saved_model is not None:
+            available_models = await list_chatgpt_models()
+            if saved_model.model_id not in {model.model_id for model in available_models}:
+                raise CliError(
+                    "the saved ChatGPT model is no longer available; run jevpilot shell and /model"
+                )
+            selected_catalog_model = next(
+                model for model in available_models
+                if model.model_id == saved_model.model_id
+            )
+            if saved_model.fast and not selected_catalog_model.supports_fast:
+                raise CliError("the selected ChatGPT model does not support Fast mode")
+            if saved_model.reasoning_effort not in selected_catalog_model.reasoning_efforts:
+                raise CliError("the selected ChatGPT model does not support its saved reasoning level")
         thresholds = _jev_thresholds() if config.mode == "jev_hybrid" else (0.0, 0.0)
-        planner = LLMPlannerProvider(selection.client, model=llm_model)
-        text = LLMTextValueProvider(selection.client, model=llm_model)
+        if isinstance(selection.client, CodexClient):
+            reasoning_effort = saved_model.reasoning_effort if saved_model else "medium"
+            fast = saved_model.fast if saved_model else False
+            model_client: StructuredModelClient = CodexModelClientAdapter(
+                selection.client,
+                reasoning_effort=reasoning_effort,
+                fast=fast,
+            )
+        else:
+            reasoning_effort = "medium"
+            fast = False
+            model_client = selection.client
+        planner = LLMPlannerProvider(model_client, model=llm_model)
+        text = LLMTextValueProvider(model_client, model=llm_model)
         selector = (
             JevDecisionProvider.from_env()
             if config.mode == "jev_hybrid"
-            else LLMDecisionProvider(selection.client, model=llm_model)
+            else LLMDecisionProvider(model_client, model=llm_model)
         )
         run_configuration = {
             "user_run": config.model_dump(mode="json"),
             "task": task.model_dump(mode="json"),
             "llm_provider": selection.provider.value,
             "llm_model": llm_model,
+            "llm_model_ref": f"{selection.provider.value}/{llm_model}",
+            "llm_reasoning_effort": reasoning_effort,
+            "llm_fast": fast,
+            "llm_service_tier": "fast" if fast else None,
+            "llm_supported_reasoning_efforts": (
+                saved_model.supported_reasoning_efforts
+                if saved_model is not None
+                else None
+            ),
+            "codex_preferences": (
+                {
+                    "reasoning_effort": reasoning_effort,
+                    "fast": fast,
+                }
+                if saved_model is not None
+                else None
+            ),
             "jev_model": (
                 os.getenv("JEVPILOT_JEV_MODEL")
                 if config.mode == "jev_hybrid"
@@ -131,6 +194,9 @@ async def async_main() -> int:
     except CliError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
+    except ModelSelectionError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
     except ValidationError:
         print("configuration error: URL, origin or completion condition is invalid", file=sys.stderr)
         return 2
@@ -151,9 +217,15 @@ async def async_main() -> int:
     llm_calls = tuple(
         call
         for call in trace.calls
-        if call.provider in {"chosun_api_gateway", "codex_subscription"}
+        if call.provider in {"chosun_api_gateway", "chatgpt-subscription"}
     )
     llm_providers = tuple(dict.fromkeys(call.provider for call in llm_calls))
+    llm_model_refs = tuple(
+        dict.fromkeys(
+            f"{call.provider}/{call.request_model}"
+            for call in llm_calls
+        )
+    )
     input_tokens = sum(
         call.usage.input_tokens
         for call in llm_calls
@@ -197,6 +269,7 @@ async def async_main() -> int:
         f"reason={trace.terminal.reason}",
         f"artifact={artifact}",
         f"llm_provider={','.join(llm_providers) or 'none'}",
+        f"llm_model_ref={','.join(llm_model_refs) or 'none'}",
         f"llm_requests={len(llm_calls)}",
         f"llm_usage_tokens_known={input_tokens + output_tokens}",
         f"llm_usage_incomplete_calls={incomplete_usage_calls}",
@@ -207,4 +280,6 @@ async def async_main() -> int:
 
 
 def entrypoint() -> None:
+    if sys.argv[1:] == ["shell"]:
+        raise SystemExit(run_shell())
     raise SystemExit(anyio.run(async_main))

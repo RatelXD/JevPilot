@@ -131,6 +131,10 @@ class Observer:
     ) -> tuple[Observation, tuple[ActionCandidate, ...]]:
         self._ensure_open()
         self._ensure_deadline(deadline_monotonic)
+        await self._with_deadline(
+            self._page.wait_for_load_state("domcontentloaded"),
+            deadline_monotonic,
+        )
         self._validate_current_origin()
 
         snapshot_id = f"snapshot-{uuid4().hex}"

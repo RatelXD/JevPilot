@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 
+import anyio
 import pytest
 from playwright.async_api import Browser, BrowserContext, Page, Route, async_playwright
 
@@ -19,6 +20,59 @@ async def browser() -> AsyncIterator[Browser]:
         browser = await playwright.chromium.launch(headless=True)
         yield browser
         await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_observer_waits_for_document_parsing(
+    browser: Browser,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_requested = anyio.Event()
+    release_script = anyio.Event()
+    waiting_for_document = anyio.Event()
+    context = await browser.new_context()
+    page = await context.new_page()
+    original_wait = page.wait_for_load_state
+
+    async def wait_for_document(*args, **kwargs):
+        waiting_for_document.set()
+        return await original_wait(*args, **kwargs)
+
+    async def serve(route: Route) -> None:
+        if route.request.url.endswith("/parser.js"):
+            script_requested.set()
+            await release_script.wait()
+            await route.fulfill(body="", content_type="application/javascript")
+        else:
+            await route.fulfill(
+                body='<html><head><script src="/parser.js"></script></head>'
+                '<body><button>Ready control</button></body></html>',
+                content_type="text/html",
+            )
+
+    await page.route("**/*", serve)
+    observer = Observer(page, task=task_spec(), privacy=PrivacyPolicy())
+    candidates = ()
+
+    async def observe() -> None:
+        nonlocal candidates
+        _, candidates = await observer.observe(deadline_monotonic=time.monotonic() + 10)
+
+    try:
+        await page.goto(ORIGIN, wait_until="commit")
+        with anyio.fail_after(10):
+            await script_requested.wait()
+            assert await page.evaluate("document.body === null")
+            monkeypatch.setattr(page, "wait_for_load_state", wait_for_document)
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(observe)
+                await waiting_for_document.wait()
+                release_script.set()
+        assert "Ready control" in [candidate.name for candidate in candidates]
+    finally:
+        release_script.set()
+        await observer.close()
+        await context.close()
 
 
 def task_spec(

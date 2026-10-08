@@ -46,8 +46,10 @@ def _jev_thresholds() -> tuple[float, float]:
         "JEVPILOT_JEV_OPERATION_THRESHOLD",
         "JEVPILOT_JEV_TARGET_THRESHOLD",
     ):
+        raw_value = os.getenv(key)
+        value_text = "0.5" if raw_value is None else raw_value.strip()
         try:
-            value = Decimal(_required_setting(key))
+            value = Decimal(value_text)
         except InvalidOperation:
             raise CliError(f"{key} must be between 0 and 1") from None
         if not value.is_finite() or not 0 <= value <= 1:
@@ -137,8 +139,8 @@ async def _run(config: UserRunConfig) -> ExecutionTrace:
                 else None
             ),
             "jev_model": (
-                os.getenv("JEVPILOT_JEV_MODEL")
-                if config.mode == "jev_hybrid"
+                selector.model
+                if isinstance(selector, JevDecisionProvider)
                 else None
             ),
             "operation_threshold": thresholds[0],

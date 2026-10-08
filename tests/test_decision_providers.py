@@ -131,6 +131,66 @@ def call_context() -> tuple[CallContext, list[CallEvent]]:
 
 
 @pytest.mark.asyncio
+async def test_jev_provider_defaults_model_and_endpoint_with_only_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    monkeypatch.setenv("JEVPILOT_JEV_API_KEY", "test-key")
+    monkeypatch.delenv("JEVPILOT_JEV_MODEL", raising=False)
+    monkeypatch.delenv("JEVPILOT_JEV_ENDPOINT", raising=False)
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        raise AssertionError("provider construction must not send a request")
+
+    # When
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(handler)
+    ) as http_client:
+        provider = JevDecisionProvider.from_env(http_client=http_client)
+
+        # Then
+        assert provider.model == "jev-latest"
+        assert provider._client.config.endpoint == "https://api.typesafe.ai/v1/systemone"
+        await provider.aclose()
+
+
+def test_jev_provider_rejects_missing_api_key_with_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    monkeypatch.delenv("JEVPILOT_JEV_API_KEY", raising=False)
+    monkeypatch.delenv("JEVPILOT_JEV_MODEL", raising=False)
+    monkeypatch.delenv("JEVPILOT_JEV_ENDPOINT", raising=False)
+
+    # When / Then
+    with pytest.raises(ProviderError, match="JEVPILOT_JEV_API_KEY"):
+        _ = JevDecisionProvider.from_env()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "JEVPILOT_JEV_API_KEY",
+        "JEVPILOT_JEV_MODEL",
+        "JEVPILOT_JEV_ENDPOINT",
+    ],
+)
+def test_jev_provider_rejects_empty_explicit_settings(
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    monkeypatch.setenv("JEVPILOT_JEV_API_KEY", "test-key")
+    monkeypatch.delenv("JEVPILOT_JEV_MODEL", raising=False)
+    monkeypatch.delenv("JEVPILOT_JEV_ENDPOINT", raising=False)
+    monkeypatch.setenv(name, " ")
+
+    # When / Then
+    with pytest.raises(ProviderError, match=name):
+        _ = JevDecisionProvider.from_env()
+
+
+@pytest.mark.asyncio
 async def test_jev_click_uses_one_operation_and_target_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

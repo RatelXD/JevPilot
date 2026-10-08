@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import TYPE_CHECKING, Protocol, TypeGuard, final
+from typing import TYPE_CHECKING, Final, Protocol, TypeGuard, final
 from uuid import uuid4
 
 import httpx2
@@ -34,7 +34,8 @@ if TYPE_CHECKING:
     from jevpilot.telemetry.models import CallContext
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
-_JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+_JEV_ENDPOINT: Final = "https://api.typesafe.ai/v1/systemone"
+_JEV_MODEL: Final = "jev-latest"
 _JEV_RETRY_STATUSES = frozenset({429, 529})
 _FIRST_SLICE_OPERATIONS = frozenset(
     {
@@ -54,6 +55,28 @@ _TARGET_OPERATIONS = frozenset(
 _DIRECTION_OPERATIONS = frozenset({ActionType.SCROLL_UP, ActionType.SCROLL_DOWN})
 _PROBABILITY_SUM_TOLERANCE = 1e-6
 _MAX_CHOICE_OPTIONS = 255
+
+
+def _jev_setting(name: str, *, default: str | None = None) -> str:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        if default is not None:
+            return default
+        raise ProviderError(
+            kind="configuration",
+            call_id="configuration",
+            retryable=False,
+            message=f"{name} must be set in the process environment",
+        )
+    value = raw_value.strip()
+    if value:
+        return value
+    raise ProviderError(
+        kind="configuration",
+        call_id="configuration",
+        retryable=False,
+        message=f"{name} must not be empty",
+    )
 
 
 class DecisionProvider(Protocol):
@@ -147,16 +170,9 @@ class JevDecisionProvider:
         http_client: httpx2.AsyncClient | None = None,
         privacy_policy: PrivacyPolicy | None = None,
     ) -> "JevDecisionProvider":
-        api_key = os.getenv("JEVPILOT_JEV_API_KEY", "")
-        model = os.getenv("JEVPILOT_JEV_MODEL", "")
-        endpoint = os.getenv("JEVPILOT_JEV_ENDPOINT", _JEV_ENDPOINT)
-        if not api_key or not model or not endpoint:
-            raise ProviderError(
-                kind="configuration",
-                call_id="configuration",
-                retryable=False,
-                message="Jev provider configuration is incomplete",
-            )
+        api_key = _jev_setting("JEVPILOT_JEV_API_KEY")
+        model = _jev_setting("JEVPILOT_JEV_MODEL", default=_JEV_MODEL)
+        endpoint = _jev_setting("JEVPILOT_JEV_ENDPOINT", default=_JEV_ENDPOINT)
         client = ModelClient[DecisionOutput](
             ModelClientConfig(
                 provider="jev",

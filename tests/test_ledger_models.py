@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from jevpilot.ledger.models import CallRecord, CallUsage, Span
+from jevpilot.ledger.models import Aggregate, CallRecord, CallUsage, Span
 from jevpilot.llm.pricing import PRICES, estimate_cost_usd
 
 
@@ -113,3 +113,17 @@ def test_known_zero_usage_has_known_zero_estimate() -> None:
     cost = estimate_cost_usd("openai", "gpt-5.3-codex", usage)
     # Then
     assert cost == Decimal("0")
+
+
+def test_aggregate_preserves_known_zero_count_and_legacy_nonzero_sum() -> None:
+    # Given / When
+    zero = Aggregate(known_sum=Decimal("0"), known_count=2, unknown_count=1, complete=False)
+    restored = Aggregate.model_validate_json(zero.model_dump_json())
+    legacy = Aggregate.model_validate_json('{"known_sum": "0.021", "unknown_count": 0}')
+    # Then
+    assert restored.known_count == 2
+    assert restored.known_sum == 0
+    assert legacy.known_count == 1
+    assert Aggregate().known_count == 0
+    with pytest.raises(ValidationError):
+        _ = Aggregate(known_count=-1)

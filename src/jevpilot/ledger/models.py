@@ -93,6 +93,8 @@ class CallRecord(LedgerModel):
 
 class Aggregate(LedgerModel):
     known_sum: Decimal = Decimal("0")
+    # Older receipts prove at least one known entry only for nonzero sums.
+    known_count: Count = Field(default_factory=lambda data: 1 if data["known_sum"] != 0 else 0)
     unknown_count: Count = 0
     complete: bool = True
 

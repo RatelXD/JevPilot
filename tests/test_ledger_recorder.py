@@ -48,7 +48,7 @@ def test_summary_keeps_independent_partial_cost_and_token_totals() -> None:
     # Then
     assert totals.calls == 2
     assert totals.billed_usd.model_dump() == {
-        "known_sum": Decimal("1"), "unknown_count": 1, "complete": False,
+        "known_sum": Decimal("1"), "known_count": 1, "unknown_count": 1, "complete": False,
     }
     assert totals.api_estimate_usd.known_sum == Decimal("2")
     assert totals.api_estimate_usd.unknown_count == 1
@@ -56,6 +56,27 @@ def test_summary_keeps_independent_partial_cost_and_token_totals() -> None:
     assert totals.input_tokens.unknown_count == 2
     assert not totals.input_tokens.complete
     assert ledger.summary().by_kind["jev"].billed_usd.complete
+
+
+def test_summary_counts_non_none_zero_unknown_and_inapplicable_costs() -> None:
+    # Given
+    ledger = RunLedger(clock=lambda: 0.0)
+    ledger.record_call(call(ledger, "zero", billed_usd=Decimal("0"), api_estimate_usd=Decimal("0")))
+    ledger.record_call(call(ledger, "unknown"))
+    # When
+    summary = ledger.summary()
+    totals = summary.by_kind["llm"]
+    # Then
+    for aggregate in (totals.billed_usd, totals.api_estimate_usd):
+        assert aggregate.known_sum == 0
+        assert aggregate.known_count == 1
+        assert aggregate.unknown_count == 1
+        assert not aggregate.complete
+    assert totals.input_tokens.known_count == 0
+    assert totals.input_tokens.unknown_count == 2
+    assert totals.api_equivalent_usd.known_count == 0
+    assert totals.api_equivalent_usd.unknown_count == 0
+    assert summary.by_kind["jev"].billed_usd.known_count == 0
 
 
 def test_subscription_is_only_priced_as_exact_openai_api_equivalent() -> None:

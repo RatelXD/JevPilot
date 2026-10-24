@@ -10,26 +10,14 @@ from typing import Final, Literal, cast
 
 from jevpilot.codex_auth import ensure_jevpilot_home
 
-CredentialProvider = Literal[
-    "openai",
-    "anthropic",
-    "google",
-    "openrouter",
-    "openai_compatible",
-    "chosun_gateway",
-    "jev",
-]
+CredentialProvider = Literal["openai", "anthropic", "jev"]
 
 _ENV_KEY: Final[dict[str, str]] = {
     "openai": "JEVPILOT_OPENAI_API_KEY",
     "anthropic": "JEVPILOT_ANTHROPIC_API_KEY",
-    "google": "JEVPILOT_GOOGLE_API_KEY",
-    "openrouter": "JEVPILOT_OPENROUTER_API_KEY",
-    "openai_compatible": "JEVPILOT_COMPAT_API_KEY",
-    "chosun_gateway": "JEVPILOT_LLM_API_KEY",
     "jev": "JEVPILOT_JEV_API_KEY",
 }
-_ENV_BASE_URL: Final[dict[str, str]] = {"openai_compatible": "JEVPILOT_COMPAT_BASE_URL"}
+_ENV_BASE_URL: Final[dict[str, str]] = {}
 _FILE_NAME: Final = "credentials.json"
 _VERSION: Final = 1
 
@@ -139,7 +127,7 @@ def get_api_key(provider: CredentialProvider) -> str | None:
 
 
 def get_base_url(provider: CredentialProvider) -> str | None:
-    """Base URL for OpenAI-compatible providers: environment first, then stored."""
+    """Stored base URL for a provider, if any (environment first when one is mapped)."""
     name = _ENV_BASE_URL.get(provider)
     if name:
         env = os.environ.get(name, "").strip()

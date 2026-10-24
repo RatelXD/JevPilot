@@ -8,15 +8,7 @@ from pydantic import JsonValue
 from jevpilot.llm.errors import LLMErrorKind
 
 AuthMode = Literal["api", "subscription"]
-ProviderId = Literal[
-    "openai",
-    "anthropic",
-    "google",
-    "openrouter",
-    "openai_compatible",
-    "chosun_gateway",
-    "chatgpt_subscription",
-]
+ProviderId = Literal["openai", "anthropic", "chatgpt_subscription"]
 Purpose = Literal["brief", "text", "choose", "replan", "extract", "agent_step"]
 StructuredOutputMode = Literal["native", "prompted"]
 CallOutcome = Literal["ok"] | LLMErrorKind

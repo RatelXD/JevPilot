@@ -23,13 +23,18 @@ from jevpilot.task import ContractViolation
 
 def _aggregate(values: Iterable[int | Decimal | None]) -> Aggregate:
     known = Decimal("0")
+    known_count = 0
     unknown = 0
     for value in values:
         if value is None:
             unknown += 1
         else:
             known += Decimal(value)
-    return Aggregate(known_sum=known, unknown_count=unknown, complete=unknown == 0)
+            known_count += 1
+    return Aggregate(
+        known_sum=known, known_count=known_count,
+        unknown_count=unknown, complete=unknown == 0,
+    )
 
 
 @dataclass(frozen=True, slots=True)

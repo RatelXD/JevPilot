@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+
+from jevpilot.browser.env import prepare_browser_use_environment
+
+prepare_browser_use_environment()
+
 from browser_use.llm.base import BaseChatModel
 from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
 from browser_use.llm.messages import (
@@ -21,7 +26,6 @@ from browser_use.llm.messages import (
 )
 from pydantic import BaseModel
 
-from jevpilot.browser.env import prepare_browser_use_environment
 from jevpilot.llm import (
     CallScope,
     Capabilities,
@@ -34,8 +38,6 @@ from jevpilot.llm import (
 )
 from jevpilot.llm.bridge import JevPilotChatModel
 from jevpilot.llm.structured import parse_structured
-
-prepare_browser_use_environment()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SEARCH_FIXTURE = REPO_ROOT / "benchmarks" / "tasks" / "fixtures" / "search.html"

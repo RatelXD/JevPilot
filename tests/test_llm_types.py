@@ -1,5 +1,5 @@
 import time
-from typing import cast
+from typing import cast, get_args
 
 from jevpilot.llm import (
     Capabilities,
@@ -10,6 +10,7 @@ from jevpilot.llm import (
     LLMResult,
     LLMUsage,
     ModelRef,
+    ProviderId,
 )
 
 
@@ -65,6 +66,10 @@ def test_model_ref_defaults() -> None:
     assert ref.reasoning_effort is None
     assert ref.fast is False
     assert ref.base_url is None
+
+
+def test_provider_ids_are_openai_anthropic_and_chatgpt_subscription() -> None:
+    assert get_args(ProviderId) == ("openai", "anthropic", "chatgpt_subscription")
 
 
 def test_request_images_default_is_not_shared() -> None:

@@ -21,19 +21,19 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     for name in credentials._ENV_KEY.values():
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.delenv("JEVPILOT_COMPAT_BASE_URL", raising=False)
     return tmp_path
 
 
 def test_save_is_0600_and_roundtrips(home: Path) -> None:
     save_credential("openai", SENTINEL)
-    save_credential("openai_compatible", "k2", "https://x.example/v1")
+    save_credential("anthropic", "k2", "https://x.example/v1")
     path = home / ".jevpilot" / "credentials.json"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     loaded = load_credentials()
     assert loaded["openai"].api_key == SENTINEL
-    assert loaded["openai_compatible"].base_url == "https://x.example/v1"
-    assert get_base_url("openai_compatible") == "https://x.example/v1"
+    assert loaded["anthropic"].base_url == "https://x.example/v1"
+    assert get_base_url("anthropic") == "https://x.example/v1"
+    assert get_base_url("openai") is None
 
 
 def test_env_beats_stored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -41,9 +41,14 @@ def test_env_beats_stored(monkeypatch: pytest.MonkeyPatch) -> None:
     assert get_api_key("openai") == "stored"
     monkeypatch.setenv("JEVPILOT_OPENAI_API_KEY", "from-env")
     assert get_api_key("openai") == "from-env"
-    monkeypatch.setenv("JEVPILOT_COMPAT_BASE_URL", "https://env.example")
-    assert get_base_url("openai_compatible") == "https://env.example"
     assert get_api_key("anthropic") is None
+
+
+def test_only_openai_anthropic_and_jev_are_supported() -> None:
+    assert set(credentials._ENV_KEY) == {"openai", "anthropic", "jev"}
+    for removed in ("google", "openrouter", "openai_compatible", "chosun_gateway"):
+        with pytest.raises(ValueError):
+            save_credential(removed, "k")  # pyright: ignore[reportArgumentType]
 
 
 def test_symlink_rejected(home: Path) -> None:

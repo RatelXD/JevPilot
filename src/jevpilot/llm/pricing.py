@@ -28,6 +28,10 @@ PRICES: Final[dict[tuple[str, str], Price]] = {
         Decimal("0.042"), Decimal("0"), Decimal("0.042"),
         "https://docs.typesafe.ai/models.md", "2026-10-23",
     ),
+    ("jev", "jev-1.14.0"): Price(
+        Decimal("0.042"), Decimal("0"), Decimal("0.042"),
+        "https://docs.typesafe.ai/models.md", "2026-10-24",
+    ),
     ("openai", "gpt-5.3-codex"): Price(
         Decimal("1.75"), Decimal("14"), Decimal("0.175"),
         "https://developers.openai.com/api/docs/pricing", "2026-10-23",

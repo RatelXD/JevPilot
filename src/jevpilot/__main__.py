@@ -1,3 +1,3 @@
-from .cli import entrypoint
+from .app import entrypoint
 
 entrypoint()

@@ -2,12 +2,12 @@ from typing import Literal
 
 import pytest
 
-from jevpilot.browser.port import Observation
+from jevpilot.browser.port import BrowserAction, ElementRef, Observation
 from jevpilot.engine.brief import (
     AnswerFields, Comparison, Condition, Extraction, FieldValue, OutputField,
-    TaskBrief, UrlContains, VisibleText,
+    TaskBrief, UrlContains, VisibleText, OpenedTarget,
 )
-from jevpilot.engine.verify import verify
+from jevpilot.engine.verify import OpenEvidence, verify
 
 
 def observation(text: str = "1397년 출생", url: str = "https://example.test/done") -> Observation:
@@ -267,3 +267,73 @@ def test_done_when_only_model_declaration_is_visible_cannot_finish() -> None:
     result = verify(page, task)
     # Then
     assert result.status == "UNKNOWN"
+
+
+@pytest.mark.parametrize("change", ["typed", "initial", "wrong_destination", "opened", "dialog"])
+def test_opened_target_requires_browser_transition_not_a_name(change: str) -> None:
+    # Given
+    before = observation("Widget", "https://example.test/list")
+    target = ElementRef(
+        snapshot_id="s", index=1, backend_node_id=1, tag="a", text="Widget",
+        attributes={"href": "/detail?region=north"}, in_viewport=True,
+    )
+    after = observation("Widget details", "https://example.test/detail?region=north")
+    action = BrowserAction(kind="click", target=target)
+    if change in {"initial", "typed"}:
+        after = before
+        action = BrowserAction(kind="type_text", target=target, value="Widget")
+    if change == "wrong_destination":
+        after = after.model_copy(update={"url": "https://example.test/detail?region=south"})
+    if change == "dialog":
+        target = target.model_copy(update={"attributes": {}})
+        action = BrowserAction(kind="click", target=target)
+        after = after.model_copy(update={
+            "url": before.url,
+            "elements": [target.model_copy(update={"role": "dialog"})],
+        })
+    # When
+    result = verify(after, brief([OpenedTarget(text="Widget")]), opened=(
+        OpenEvidence(before, action, after),
+    ))
+    # Then
+    assert result.status == ("PASS" if change in {"opened", "dialog"} else "FAIL")
+
+
+@pytest.mark.parametrize("change", [
+    "delayed", "unrelated", "wrong_target", "wrong_destination", "listing",
+    "stale", "uncertain", "unexecuted", "no_navigation",
+])
+def test_delayed_open_is_bound_to_executed_target_and_document(change: str) -> None:
+    # Given: the first post-click observation predates the destination commit.
+    before = observation("Widget", "https://example.test/list")
+    target = ElementRef(
+        snapshot_id="s", index=1, backend_node_id=1, tag="a", text="Widget",
+        attributes={"href": "/detail"}, in_viewport=True,
+    )
+    current = observation("Widget details", "https://example.test/detail").model_copy(
+        update={"document_id": "click-loader"},
+    )
+    from jevpilot.browser.port import ExecutionResult
+    result = ExecutionResult(outcome="executed", navigation_id="click-loader")
+    if change == "unrelated":
+        current = current.model_copy(update={"document_id": "later-loader"})
+    if change == "wrong_target":
+        target = target.model_copy(update={"text": "Other"})
+    if change == "wrong_destination":
+        current = current.model_copy(update={"url": "https://example.test/other"})
+    if change == "listing":
+        current = before.model_copy(update={"document_id": "click-loader"})
+    if change == "stale":
+        target = target.model_copy(update={"snapshot_id": "old"})
+    if change in {"uncertain", "unexecuted"}:
+        result = result.model_copy(update={
+            "outcome": "uncertain" if change == "uncertain" else "failed_not_executed",
+        })
+    if change == "no_navigation":
+        result = result.model_copy(update={"navigation_id": None})
+    # When
+    checked = verify(current, brief([OpenedTarget(text="Widget")]), opened=(
+        OpenEvidence(before, BrowserAction(kind="click", target=target), before, result),
+    ))
+    # Then
+    assert checked.status == ("PASS" if change == "delayed" else "FAIL")

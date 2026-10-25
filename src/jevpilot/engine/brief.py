@@ -33,9 +33,22 @@ class AnswerFields(_Model):
     names: list[NonBlank] = Field(min_length=1)
 
 
+class OpenedTarget(_Model):
+    """A requested item must be opened, not merely listed or suggested."""
+
+    kind: Literal["opened_target"] = "opened_target"
+    text: NonBlank = Field(description=(
+        "Literal name of the item to open, copied from the task, in its original "
+        "language. This is a substring matched against the clicked element and "
+        "destination content, NOT a description of the action or UI container. "
+        "Exclude words describing suggestions, results, buttons, opening, or searching "
+        "unless those words are part of the item's proper name."
+    ))
+
+
 # Literal tags still disambiguate validation; a plain union emits anyOf, which
 # native structured-output providers accept (discriminated unions emit oneOf).
-Condition = UrlContains | VisibleText | AnswerFields
+Condition = UrlContains | VisibleText | AnswerFields | OpenedTarget
 
 
 class Comparison(_Model):
@@ -110,6 +123,16 @@ async def build_brief(
                 "Interpret the complete browser task, including every line. "
                 "Restate the goal, collect supplied inputs, required answer fields "
                 "and observable completion conditions. Never invent missing inputs "
+                "or destination URLs. Conditions describe ONLY the requested FINAL "
+                "state, not intermediate controls or steps. When the task asks to "
+                "open an item, result, or suggestion, use opened_target with its "
+                "literal item name alone, not a paraphrase such as a named search "
+                "result or autocomplete suggestion: seeing its name in a list is "
+                "not completion. Preserve the item's spelling and language. Do not require "
+                "search fields, filter controls or option labels to remain visible "
+                "after opening the destination. Use visible_text for a requested "
+                "visible outcome and answer_fields for information requests; these "
+                "tasks do not necessarily require navigation. Never invent "
                 "or claim completion. Use start_url only when supplied or unambiguous; "
                 "otherwise null. List missing inputs. Mark mutating intent and "
                 "multi-step tasks. For numeric comparisons identify the answer field "

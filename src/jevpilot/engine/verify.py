@@ -6,10 +6,12 @@ import re
 from typing import Final, Literal, assert_never
 import unicodedata
 
-from jevpilot.browser.port import Observation
+from urllib.parse import urljoin
+
+from jevpilot.browser.port import BrowserAction, ExecutionResult, Observation
 from jevpilot.engine.brief import (
     AnswerFields, Comparison, Extraction, FieldValue, TaskBrief, UrlContains,
-    VisibleText,
+    VisibleText, OpenedTarget,
 )
 
 VerifyStatus = Literal["PASS", "FAIL", "UNKNOWN"]
@@ -24,6 +26,48 @@ _NO_RESULT: Final = (
 class VerifyResult:
     status: VerifyStatus
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class OpenEvidence:
+    before: Observation
+    action: BrowserAction
+    after: Observation
+    result: ExecutionResult = ExecutionResult(outcome="executed")
+
+
+def _opened(text: str, observation: Observation, evidence: tuple[OpenEvidence, ...]) -> bool:
+    wanted = _normalize(text).casefold()
+    for item in evidence:
+        target = item.action.target
+        if item.action.kind != "click" or target is None:
+            continue
+        if item.result.outcome != "executed" or target.snapshot_id != item.before.snapshot_id:
+            continue
+        if wanted not in _normalize(target.text).casefold():
+            continue
+        if item.result.navigation_id is not None:
+            if observation.document_id != item.result.navigation_id:
+                continue
+        elif (
+            observation.url != item.after.url
+            or observation.document_id != item.after.document_id
+        ):
+            continue
+        if wanted not in _normalize(observation.page_text).casefold():
+            continue
+        href = target.attributes.get("href")
+        if href:
+            if observation.url == urljoin(item.before.url, href) and observation.url != item.before.url:
+                return True
+        elif observation.url != item.before.url:
+            return True
+        elif (
+            observation.page_text != item.before.page_text
+            and any(e.role == "dialog" for e in observation.elements)
+        ):
+            return True
+    return False
 
 
 def _normalize(text: str) -> str:
@@ -76,6 +120,8 @@ def verify(
     observation: Observation | None,
     brief: TaskBrief | None,
     extraction: Extraction | None = None,
+    *,
+    opened: tuple[OpenEvidence, ...] = (),
 ) -> VerifyResult:
     """Verify every condition and required answer against the current snapshot.
 
@@ -91,6 +137,10 @@ def verify(
     page_text = _normalize(observation.page_text)
     for condition in brief.success_conditions:
         match condition:
+            case OpenedTarget(text=text):
+                if not _opened(text, observation, opened):
+                    return VerifyResult("FAIL", "target_not_opened")
+                continue
             case UrlContains(text=text):
                 if not observation.url:
                     unknown = True

@@ -14,14 +14,24 @@ from jevpilot.task import ContractViolation
 def _input_lengths(value: JsonValue) -> JsonValue:
     match value:
         case dict():
+            options = value.get("observed_options")
+            selected = value.get("value")
+            public_option = (
+                value.get("event") == "execution"
+                and value.get("operation") == "select_option"
+                and isinstance(selected, str)
+                and isinstance(options, list)
+                and selected in options
+            )
             return {
                 key: (
                     len(item) if isinstance(item, str) else len(json.dumps(item, ensure_ascii=False))
                 ) if key.lower() in {
                     "input", "value", "text", "input_value", "input_values",
                     "user_input", "user_payload", "prompt", "instructions",
-                } else _input_lengths(item)
+                } and not (key == "value" and public_option) else _input_lengths(item)
                 for key, item in value.items()
+                if key != "observed_options"
             }
         case list():
             return [_input_lengths(item) for item in value]

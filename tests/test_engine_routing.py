@@ -83,9 +83,9 @@ def test_confidence_table_when_each_signal_crosses_its_boundary(
      Route("easy", "jev_execute", "easy_signals")),
     (DONE, ANSWERS, RoutingHistory(), Route("mid", "llm_extract", "answer_extraction_needed")),
     (replace(SIGNALS, verification=VerifyResult("FAIL", "answer_fields_missing")), ANSWERS,
-     RoutingHistory(), Route("mid", "llm_extract", "answer_extraction_needed")),
+     RoutingHistory(), Route("easy", "jev_execute", "easy_signals")),
     (replace(SIGNALS, verification=verify(PAGE, ANSWERS)), ANSWERS,
-     RoutingHistory(), Route("mid", "llm_extract", "answer_extraction_needed")),
+     RoutingHistory(), Route("easy", "jev_execute", "easy_signals")),
     (replace(SIGNALS, verification=VerifyResult("FAIL", "visible_text_mismatch")), ANSWERS,
      RoutingHistory(), Route("easy", "jev_execute", "easy_signals")),
     (replace(DONE, verification=VerifyResult("PASS", "conditions_met")), ANSWERS,
@@ -288,3 +288,29 @@ def test_route_event_when_persisted_contains_signals_and_policy_without_inputs(t
     assert isinstance(data["signals"], dict) and data["signals"]["op_confidence"] == 0.85
     assert isinstance(data["history"], dict) and data["history"]["llm_calls"] == 0
     assert "supplied" not in lines[-1]
+
+
+@pytest.mark.parametrize("operation,binding,navigation,confidence,expected", [
+    ("click", False, True, 0.85, "jev_execute"),
+    ("click", False, True, 0.849, "llm_choose"),
+    ("click", False, False, 1.0, "llm_choose"),
+    ("type_text", True, False, 0.85, "jev_execute"),
+    ("type_text", True, False, 0.849, "llm_choose"),
+    ("type_text", False, True, 1.0, "llm_choose"),
+    ("scroll_down", False, True, 1.0, "llm_choose"),
+])
+def test_structured_routing_when_operation_and_target_contract_match(
+    operation: str, binding: bool, navigation: bool, confidence: float, expected: str,
+) -> None:
+    # Given: the loop marks only complete structured tasks with compatible targets.
+    decision = replace(DECISION, operation=operation, signals=replace(
+        SCORES, op_confidence=0.5, op_margin=0.01, target_confidence=confidence,
+    ))
+    signals = replace(
+        SIGNALS, decision=decision, input_binding_unique=binding,
+        structured_navigation=navigation,
+    )
+    # When
+    result = route(signals, BRIEF, RoutingHistory(), ledger=RunLedger())
+    # Then
+    assert result.action == expected

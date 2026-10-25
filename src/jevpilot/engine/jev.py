@@ -132,7 +132,7 @@ def _probability(value: JsonValue | None) -> bool:
 def _parse_choice(
     answer: JsonValue | None, expected: frozenset[str], metadata: ResponseMetadata,
 ) -> _Choice:
-    """Same acceptance rules as v1: allowed value, probabilities sum to 1, argmax."""
+    """Validate native choices, allowing only bounded two-decimal rounding."""
     if not isinstance(answer, dict) or set(answer) != {
         "type", "choice", "probabilities", "confidence",
     }:
@@ -151,12 +151,19 @@ def _parse_choice(
         if not _probability(value):
             raise _invalid(metadata)
         parsed[key] = float(value)  # pyright: ignore[reportArgumentType]
-    if not math.isclose(sum(parsed.values()), 1.0, rel_tol=0.0, abs_tol=_PROBABILITY_SUM_TOLERANCE):
-        raise _invalid(metadata)
+    total = math.fsum(parsed.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=_PROBABILITY_SUM_TOLERANCE):
+        decimals = [Decimal(str(value)).quantize(Decimal("0.01")) for value in parsed.values()]
+        if (
+            total == 0
+            or any(abs(value * 100 - round(value * 100)) > 1e-9 for value in parsed.values())
+            or abs(sum(decimals) - 1) > Decimal("0.005") * len(decimals)
+        ):
+            raise _invalid(metadata)
     top = max(parsed.values())
     if parsed[choice] < top and not math.isclose(parsed[choice], top, rel_tol=0.0, abs_tol=1e-12):
         raise _invalid(metadata)
-    return _Choice(choice, parsed, float(confidence))  # pyright: ignore[reportArgumentType]
+    return _Choice(choice, {key: value / total for key, value in parsed.items()}, float(confidence))  # pyright: ignore[reportArgumentType]
 
 
 def _parse_answers(body: JsonValue, metadata: ResponseMetadata) -> _Answers:
@@ -339,7 +346,12 @@ class JevSelector:
                             retry_after=response.headers.get("Retry-After"),
                         )
                     try:
-                        parsed = interpret(_parse_answers(body, metadata), metadata)
+                        answers = _parse_answers(body, metadata)
+                        scope.ledger.event("recovery", {
+                            "event": "jev_response", "call_id": call_id,
+                            "answers": answers.answers,
+                        })
+                        parsed = interpret(answers, metadata)
                     except ValidationError:
                         raise _invalid(metadata) from None
                     outcome = "ok"

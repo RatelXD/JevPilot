@@ -57,6 +57,8 @@ class RoutingSignals:
     input_key: str | None = None
     subgoal: str = ""
     verification: VerifyResult | None = None
+    input_binding_unique: bool = False
+    structured_navigation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +85,7 @@ def _decide(
     policy: RoutingPolicy,
 ) -> Route:
     observation, decision = signals.observation, signals.decision
-    if brief.missing_inputs:
+    if brief.missing_inputs and decision.operation == "type_text":
         return Route("high", "ask_user", "missing_inputs")
     if history.steps >= policy.max_steps:
         return Route("high", "ask_user", "step_limit")
@@ -114,18 +116,27 @@ def _decide(
         or any(isinstance(c, AnswerFields) for c in brief.success_conditions)
     )
     verification = signals.verification
-    extraction_missing = verification is not None and verification.status != "PASS" and (
-        verification.reason in {"evidence_missing", "answer_fields_missing"}
-    )
     if (
         needs_answers and observation.page_text.strip()
-        and (decision.operation == "done" or extraction_missing)
+        and decision.operation == "done"
         and (verification is None or verification.status != "PASS")
     ):
         return Route("mid", "llm_extract", "answer_extraction_needed")
     if decision.operation == "type_text" and signals.input_key not in brief.input_values:
         return Route("mid", "llm_text", "input_value_missing")
     scores = decision.signals
+    if (
+        not brief.missing_inputs
+        and scores.target_confidence is not None
+        and scores.target_confidence >= policy.easy_target_conf
+        and (
+            decision.operation == "type_text" and signals.input_binding_unique
+            or decision.operation == "click" and signals.structured_navigation
+        )
+    ):
+        return Route("easy", "jev_execute", (
+            "exact_input_binding" if decision.operation == "type_text" else "structured_navigation"
+        ))
     confidence: list[tuple[float | None, float]] = [
         (scores.op_confidence, policy.easy_op_conf), (scores.op_margin, policy.easy_margin),
     ]
@@ -196,6 +207,8 @@ def route(
             "observation_present": observation is not None,
             "fingerprint": observation.fingerprint if observation is not None else None,
             "input_available": signals.input_key in brief.input_values,
+            "input_binding_unique": signals.input_binding_unique,
+            "structured_navigation": signals.structured_navigation,
             "missing_inputs_count": len(brief.missing_inputs),
             "multi_step": brief.multi_step, "subgoal_present": bool(signals.subgoal.strip()),
             "verify_status": signals.verification.status if signals.verification else None,

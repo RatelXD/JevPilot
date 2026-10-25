@@ -77,6 +77,12 @@ class StructuredTask(_Model):
     required_outputs: list[OutputField] = Field(default_factory=list)
 
 
+class _InterpretedBrief(TaskBrief):
+    """A natural-language interpretation must declare an observable final state."""
+
+    success_conditions: list[Condition] = Field(min_length=1)
+
+
 class FieldValue(_Model):
     value: str
     quote: str
@@ -139,7 +145,7 @@ async def build_brief(
                 "and max/min kind. Do not browse, execute code, or use tools."
             ),
             user_payload={"goal": goal, "start_url": start_url},
-            output_type=TaskBrief,
+            output_type=_InterpretedBrief,
         ),
         context,
     )

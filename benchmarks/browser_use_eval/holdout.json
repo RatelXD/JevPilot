@@ -1,0 +1,6 @@
+[
+  {"scenario_id":"H-1","goal":"Find Albert Einstein's date of birth on quotes.toscrape.com.","start_url":"https://quotes.toscrape.com/","outputs":["birth_date"]},
+  {"scenario_id":"H-2","goal":"Find the license of the browser-use/browser-use repository on GitHub.","start_url":"https://github.com/browser-use/browser-use","outputs":["license"]},
+  {"scenario_id":"H-3","goal":"Find the first book title on page 2 of the Mystery category.","start_url":"https://books.toscrape.com/","outputs":["title"]},
+  {"scenario_id":"H-4","goal":"{date} 서울에서 부산 가는 KTX 중 오전 9시 이후 첫 열차의 출발 시각과 일반실 예약 가능 여부를 알려 주세요.","start_url":"https://www.letskorail.com/","outputs":["departure","availability"]}
+]

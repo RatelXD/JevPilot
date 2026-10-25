@@ -1,6 +1,9 @@
 from collections.abc import Callable
 from decimal import Decimal
+from datetime import UTC, datetime, timedelta, tzinfo
+from types import SimpleNamespace
 
+import anyio
 import httpx2
 import pytest
 from pydantic import JsonValue, TypeAdapter
@@ -304,3 +307,124 @@ async def test_validate_key_maps_failures_without_leaking_the_key(status: int, k
     assert raised.value.kind == kind
     assert KEY not in str(raised.value) and KEY not in repr(raised.value)
     assert len(sent) == 1
+
+
+@pytest.mark.parametrize(("resolved_model", "expected_cost"), [
+    ("jev-1.13.0", Decimal("0.000042")),
+    ("jev-1.14.0", Decimal("0.000042")),
+    ("jev-unknown", None),
+])
+async def test_success_when_wall_clock_reverses_keeps_one_request_and_monotonic_cost(
+    monkeypatch: pytest.MonkeyPatch, resolved_model: str, expected_cost: Decimal | None,
+) -> None:
+    # Given: inject only the old transport's clock, not its telemetry validation.
+    wall = [datetime(2026, 10, 25, tzinfo=UTC)]
+
+    def wall_now(_tz: tzinfo) -> datetime:
+        return wall[0]
+
+    monkeypatch.setattr("jevpilot.model_client.datetime", SimpleNamespace(now=wall_now))
+    now = [10.0]
+    sent: list[httpx2.Request] = []
+    ledger = RunLedger(clock=lambda: now[0])
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        wall[0] -= timedelta(hours=1)
+        now[0] += 2.5
+        body = TypeAdapter(dict[str, JsonValue]).validate_python(
+            body_for({"operation": answer("done", NO_ELEMENT_OPS)}),
+        )
+        body["model"] = resolved_model
+        return httpx2.Response(200, json=body)
+
+    # When
+    async with client_for(handler) as http:
+        result = await JevSelector(api_key=KEY, http_client=http).choose(
+            state_of([]), scope=ledger.scope(deadline=float("inf")),
+        )
+    # Then
+    assert result.operation == "done"
+    assert len(sent) == len(ledger.calls) == 1
+    assert ledger.calls[0].latency_s == 2.5
+    assert ledger.calls[0].api_estimate_usd == expected_cost
+
+
+async def test_cancelled_transmission_is_recorded_once_without_retry() -> None:
+    # Given
+    entered = anyio.Event()
+    ledger = RunLedger()
+    cancel = anyio.CancelScope()
+    sent: list[httpx2.Request] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        entered.set()
+        await anyio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def request() -> None:
+        with cancel:
+            async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
+                _ = await JevSelector(api_key=KEY, http_client=http).choose(
+                    state_of([]), scope=ledger.scope(deadline=float("inf")),
+                )
+
+    # When
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            group.start_soon(request)
+            await entered.wait()
+            cancel.cancel()
+    # Then
+    assert len(sent) == len(ledger.calls) == 1
+    assert ledger.calls[0].outcome == "cancelled"
+
+
+@pytest.mark.parametrize("status,kind,attempts", [
+    (401, "auth_invalid", 1), (402, "quota_exhausted", 1),
+    (500, "provider_unavailable", 1), (529, "rate_limited", 4),
+])
+async def test_transport_status_contract_preserves_attempt_counts(
+    status: int, kind: str, attempts: int,
+) -> None:
+    # Given
+    ledger = RunLedger()
+    sent: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        return httpx2.Response(status, headers={"Retry-After": "0"}, json={})
+
+    # When / Then
+    async with client_for(handler) as http:
+        with pytest.raises(JevUnavailable) as raised:
+            _ = await JevSelector(api_key=KEY, http_client=http).choose(
+                state_of([]), scope=ledger.scope(deadline=float("inf")),
+            )
+    assert raised.value.kind == kind
+    assert len(sent) == len(ledger.calls) == attempts
+
+
+async def test_success_when_reporter_fails_does_not_send_again() -> None:
+    # Given
+    ledger = RunLedger()
+    sent: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        return httpx2.Response(200, json=body_for({"operation": answer("done", NO_ELEMENT_OPS)}))
+
+    def fail_report(_record: CallRecord) -> None:
+        raise RuntimeError("reporter unavailable")
+
+    # When
+    async with client_for(handler) as http:
+        with pytest.raises(RuntimeError, match="reporter unavailable"):
+            _ = await JevSelector(api_key=KEY, http_client=http, on_call=fail_report).choose(
+                state_of([]), scope=ledger.scope(deadline=float("inf")),
+            )
+    # Then
+    assert len(sent) == len(ledger.calls) == 1
+    assert ledger.calls[0].outcome == "ok"
+    assert ledger.calls[0].api_estimate_usd == Decimal("0.000042")

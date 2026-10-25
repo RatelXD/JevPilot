@@ -44,6 +44,7 @@ class ElementRef(BaseModel):
     form_has_card_field: bool = False
     form_action_host: str | None = None
     options: list[Option] = Field(default_factory=list)
+    selected_values: list[str] = Field(default_factory=list)
 
     @field_validator("text")
     @classmethod
@@ -72,6 +73,7 @@ class Observation(BaseModel):
     page_text: str
     fingerprint: str
     observed_at_monotonic: float
+    document_id: str | None = None
 
     @field_validator("page_text")
     @classmethod
@@ -101,6 +103,14 @@ class ExecutionResult(BaseModel):
     outcome: ExecutionOutcome
     error_kind: str | None = None
     detail: str | None = None
+    navigation_id: str | None = None
+
+
+@runtime_checkable
+class NavigationWaiter(Protocol):
+    """Wait only for the document loader observed during the dispatched action."""
+
+    async def wait_for_navigation(self, navigation_id: str) -> None: ...
 
 
 class BrowserConfig(BaseModel):

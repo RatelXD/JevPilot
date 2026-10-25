@@ -15,6 +15,9 @@ from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
 import anyio
+from cdp_use import CDPClient
+from cdp_use.cdp.page.events import FrameStartedNavigatingEvent, LifecycleEventEvent
+from pydantic import TypeAdapter
 
 from jevpilot.browser.env import prepare_browser_use_environment
 from jevpilot.browser.port import (
@@ -143,17 +146,26 @@ def _element(
 
 def _observation(
     state: BrowserStateSummary, viewport: tuple[int, int],
+    selected: dict[int, list[str]] | None = None,
 ) -> Observation:
     snapshot_id = uuid4().hex
     elements = [
         _element(node, index, snapshot_id, state.url, viewport)
         for index, node in state.dom_state.selector_map.items()
     ]
+    if selected is not None:
+        elements = [
+            item.model_copy(update={"selected_values": [
+                value for value in selected.get(item.index, [])
+                if value in {option.value for option in item.options}
+            ]})
+            for item in elements
+        ]
     root = state.dom_state._root
     page_text = _text(root.original_node)[:20000] if root is not None else ""
     material = [
         urlsplit(state.url).path,
-        sorted((item.tag, item.role or "", item.text[:80]) for item in elements),
+        sorted((item.tag, item.role or "", item.text[:80], item.selected_values) for item in elements),
         page_text[:2000],
     ]
     return Observation(
@@ -173,6 +185,60 @@ class BrowserUseAdapter(BrowserPort):
         self._config = BrowserConfig()
         self._snapshot_id: str | None = None
         self._capabilities: dict[int, frozenset[str]] = {}
+        # A separate CDP connection owns these subscriptions: cdp-use's registry
+        # has one callback per event, so sharing would replace browser-use's.
+        self._navigation_client: CDPClient | None = None
+        self._navigation_session: str | None = None
+        self._navigation_frame: str | None = None
+        self._navigation_id: str | None = None
+        self._navigation_loaded: anyio.Event = anyio.Event()
+        self._dispatching_click: bool = False
+
+    def _navigation_started(
+        self, event: FrameStartedNavigatingEvent, session_id: str | None = None,
+    ) -> None:
+        if (
+            self._dispatching_click and self._navigation_id is None
+            and session_id == self._navigation_session
+            and event["frameId"] == self._navigation_frame
+        ):
+            self._navigation_id = event["loaderId"]
+
+    def _navigation_finished(
+        self, event: LifecycleEventEvent, session_id: str | None = None,
+    ) -> None:
+        if (
+            session_id == self._navigation_session
+            and event["frameId"] == self._navigation_frame
+            and event["loaderId"] == self._navigation_id
+            and event["name"] == "load"
+        ):
+            self._navigation_loaded.set()
+
+    async def _attach_navigation(self) -> None:
+        assert self._session is not None and self._navigation_client is not None
+        current = await self._session.get_or_create_cdp_session()
+        if self._navigation_session is not None:
+            _ = await self._navigation_client.send.Target.detachFromTarget(
+                params={"sessionId": self._navigation_session},
+            )
+        attached = await self._navigation_client.send.Target.attachToTarget(
+            params={"targetId": current.target_id, "flatten": True},
+        )
+        self._navigation_session = attached["sessionId"]
+        _ = await self._navigation_client.send.Page.enable(session_id=self._navigation_session)
+        _ = await self._navigation_client.send.Page.setLifecycleEventsEnabled(
+            params={"enabled": True}, session_id=self._navigation_session,
+        )
+        tree = await self._navigation_client.send.Page.getFrameTree(session_id=self._navigation_session)
+        self._navigation_frame = tree["frameTree"]["frame"]["id"]
+        self._navigation_id = None
+        self._navigation_loaded = anyio.Event()
+
+    async def wait_for_navigation(self, navigation_id: str) -> None:
+        if navigation_id == self._navigation_id:
+            with anyio.move_on_after(5):
+                await self._navigation_loaded.wait()
 
     async def start(self, config: BrowserConfig) -> None:
         self._config = config
@@ -183,6 +249,10 @@ class BrowserUseAdapter(BrowserPort):
             args=[f"--lang={config.locale}"], enable_default_extensions=False,
         )
         await self._session.start()
+        self._navigation_client = CDPClient(self._session.cdp_client.url)
+        await self._navigation_client.start()
+        self._navigation_client.register.Page.frameStartedNavigating(self._navigation_started)
+        self._navigation_client.register.Page.lifecycleEvent(self._navigation_finished)
         if config.start_url is not None:
             result = await self._tools.registry.execute_action(
                 "navigate", {"url": config.start_url}, browser_session=self._session,
@@ -192,12 +262,49 @@ class BrowserUseAdapter(BrowserPort):
 
     async def observe(self) -> Observation:
         assert self._session is not None
+        document_id: str | None = None
+        if self._navigation_client is not None:
+            cdp = await self._session.get_or_create_cdp_session()
+            tree = await cdp.cdp_client.send.Page.getFrameTree(session_id=cdp.session_id)
+            document_id = tree["frameTree"]["frame"]["loaderId"]
         state = await self._session.get_browser_state_summary(cached=False, include_screenshot=False)
         # 0.13.11's summary title comes from TargetInfo and can still be the URL.
         page = await self._session.get_current_page()
         assert page is not None
         state.title = await page.evaluate("() => document.title")
-        observation = _observation(state, self._config.viewport)
+        selected: dict[int, list[str]] = {}
+        for index, node in state.dom_state.selector_map.items():
+            if node.tag_name != "select":
+                continue
+            cdp = await self._session.get_or_create_cdp_session(node.target_id, focus=False)
+            resolved = await cdp.cdp_client.send.DOM.resolveNode(
+                params={"backendNodeId": node.backend_node_id}, session_id=cdp.session_id,
+            )
+            object_id = resolved["object"].get("objectId")
+            if object_id is None:
+                raise RuntimeError("Native select node is no longer available")
+            try:
+                result = await cdp.cdp_client.send.Runtime.callFunctionOn(
+                    params={
+                        "objectId": object_id,
+                        "functionDeclaration": "function() { return Array.from(this.selectedOptions, o => o.value); }",
+                        "returnByValue": True,
+                    },
+                    session_id=cdp.session_id,
+                )
+                selected[index] = TypeAdapter(list[str]).validate_python(result["result"].get("value"))
+            finally:
+                await cdp.cdp_client.send.Runtime.releaseObject(
+                    params={"objectId": object_id}, session_id=cdp.session_id,
+                )
+        observation = _observation(state, self._config.viewport, selected)
+        if self._navigation_client is not None:
+            cdp = await self._session.get_or_create_cdp_session()
+            tree = await cdp.cdp_client.send.Page.getFrameTree(session_id=cdp.session_id)
+            frame = tree["frameTree"]["frame"]
+            # Never pair DOM from one document with a later document's identity.
+            if frame["url"] == observation.url and frame["loaderId"] == document_id:
+                observation = observation.model_copy(update={"document_id": frame["loaderId"]})
         self._snapshot_id = observation.snapshot_id
         self._capabilities = {
             index: _kinds(node) for index, node in state.dom_state.selector_map.items()
@@ -254,6 +361,9 @@ class BrowserUseAdapter(BrowserPort):
                 params["url"] = action.url
             case unreachable:
                 assert_never(unreachable)
+        if action.kind == "click" and self._navigation_client is not None:
+            await self._attach_navigation()
+        self._dispatching_click = action.kind == "click"
         try:
             with anyio.fail_after(30):
                 result = await self._tools.registry.execute_action(
@@ -269,9 +379,17 @@ class BrowserUseAdapter(BrowserPort):
                 outcome="uncertain" if action.kind in _TARGETED else "failed_not_executed",
                 error_kind="execution_failed",
             )
-        return ExecutionResult(outcome="executed")
+        finally:
+            self._dispatching_click = False
+        return ExecutionResult(
+            outcome="executed",
+            navigation_id=self._navigation_id if action.kind == "click" else None,
+        )
 
     async def close(self) -> None:
+        if self._navigation_client is not None:
+            await self._navigation_client.stop()
+            self._navigation_client = None
         if self._session is not None:
             await self._session.kill()
             self._session = None

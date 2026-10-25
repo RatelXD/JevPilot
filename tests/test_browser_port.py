@@ -239,6 +239,26 @@ class FakeSession:
         assert expression == "() => document.title"
         return self.current.title
 
+    async def get_or_create_cdp_session(self, target_id: str, focus: bool) -> SimpleNamespace:
+        assert target_id == "test" and not focus
+
+        async def resolveNode(**kwargs: object) -> dict[str, object]:
+            return {"object": {"objectId": "native-select"}}
+
+        async def callFunctionOn(**kwargs: object) -> dict[str, object]:
+            return {"result": {"value": [""]}}
+
+        async def releaseObject(**kwargs: object) -> None:
+            return None
+
+        return SimpleNamespace(
+            session_id="test",
+            cdp_client=SimpleNamespace(send=SimpleNamespace(
+                DOM=SimpleNamespace(resolveNode=resolveNode),
+                Runtime=SimpleNamespace(callFunctionOn=callFunctionOn, releaseObject=releaseObject),
+            )),
+        )
+
 
 async def setup_adapter(
     monkeypatch: pytest.MonkeyPatch, target: EnhancedDOMTreeNode,
@@ -389,3 +409,47 @@ def test_port_when_adapter_is_constructed() -> None:
     assert config.headless is False
     assert config.viewport == (1280, 800)
     assert config.locale == "ko-KR"
+
+
+def test_fingerprint_uses_observed_selection_but_not_private_input_text() -> None:
+    # Given
+    select = node("select", children=[
+        node("option", attrs={"value": value}) for value in ("north", "south")
+    ])
+    text = node("input", 20, attrs={"value": "PRIVATE-A"})
+    original = state({1: select, 2: text})
+    # When
+    north = boundary._observation(original, (1280, 800), {1: ["north"]})
+    south = boundary._observation(original, (1280, 800), {1: ["south"]})
+    text.attributes["value"] = "PRIVATE-B"
+    private = boundary._observation(original, (1280, 800), {1: ["north"]})
+    # Then
+    assert north.fingerprint != south.fingerprint
+    assert north.fingerprint == private.fingerprint
+    assert north.elements[0].selected_values == ["north"]
+    assert "PRIVATE" not in private.model_dump_json()
+
+
+@pytest.mark.parametrize("change", ["matching", "frame", "session", "outside_dispatch", "second_loader"])
+async def test_navigation_subscription_accepts_only_first_main_frame_dispatch(change: str) -> None:
+    # Given: callbacks receive actual CDP loader/frame identities, not URL hashes.
+    adapter = boundary.BrowserUseAdapter()
+    adapter._navigation_session = "session"
+    adapter._navigation_frame = "main"
+    adapter._dispatching_click = change != "outside_dispatch"
+    if change == "second_loader":
+        adapter._navigation_id = "original-loader"
+    # When
+    adapter._navigation_started({
+        "frameId": "iframe" if change == "frame" else "main",
+        "url": "https://example.test/detail", "loaderId": "click-loader",
+        "navigationType": "differentDocument",
+    }, "other" if change == "session" else "session")
+    adapter._navigation_finished({
+        "frameId": "main", "loaderId": "click-loader", "name": "load", "timestamp": 1,
+    }, "session")
+    # Then
+    assert adapter._navigation_loaded.is_set() == (change == "matching")
+    assert adapter._navigation_id == (
+        "click-loader" if change == "matching" else "original-loader" if change == "second_loader" else None
+    )

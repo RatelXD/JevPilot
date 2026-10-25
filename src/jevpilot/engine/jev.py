@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from decimal import Decimal
 import math
 import os
@@ -16,20 +16,22 @@ import sys
 import time
 from typing import Final
 import unicodedata
+from uuid import uuid4
 
+import anyio
 import httpx2
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from jevpilot.browser.port import ActionKind, BrowserAction, ElementRef, Observation
 from jevpilot.engine.candidates import build_candidates
-from jevpilot.ledger.legacy_bridge import legacy_call_context
-from jevpilot.ledger.models import CallRecord
+from jevpilot.ledger.models import CallRecord, CallUsage as LedgerUsage
 from jevpilot.ledger.recorder import CallScope, RunLedger
 from jevpilot.llm.credentials import get_api_key
 from jevpilot.llm.errors import LLMErrorKind
 from jevpilot.llm.pricing import PRICES
 from jevpilot.model_client import ModelClient, ModelClientConfig, ProviderError, ResponseMetadata
-from jevpilot.telemetry.models import CallContext, CallEvent, CallUsage
+from jevpilot.telemetry.models import CallUsage
+from jevpilot.privacy import PrivacyPolicy, redact_json
 
 JEV_ENDPOINT: Final = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL: Final = "jev-latest"
@@ -271,17 +273,6 @@ def format_cost_line(record: CallRecord) -> str:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _AttemptScope(CallScope):
-    """Numbers each transport attempt's record 1, 2, ... within one logical call."""
-
-    seen: list[int] = field(default_factory=list)
-
-    def record_call(self, record: CallRecord) -> None:
-        self.seen.append(1)
-        self.ledger.record_call(record.model_copy(update={"attempts": len(self.seen)}))
-
-
 class JevSelector:
     """Operation/target/option selection through Jev ``choice`` questions."""
 
@@ -302,48 +293,101 @@ class JevSelector:
             raise JevUnavailable("auth_missing")
         return key
 
-    def _context(self, scope: CallScope) -> CallContext:
-        numbered = _AttemptScope(
-            scope.ledger, scope.parent_span_id, scope.deadline, scope.step_index,
-            scope.reserve_attempt,
-        )
-        context = legacy_call_context(numbered, role="selector", max_attempts=MAX_ATTEMPTS)
-        if self.on_call is None:
-            return context
-        record, on_call = context.record_call, self.on_call
-
-        def record_and_report(event: CallEvent) -> None:
-            record(event)
-            on_call(scope.ledger.calls[-1])
-
-        return replace(context, record_call=record_and_report)
-
     async def _ask[T](
         self, scope: CallScope, state: JsonValue, questions: dict[str, JsonValue],
         interpret: _Interpret[T],
     ) -> tuple[T, CallUsage | None, float]:
-        usage: list[CallUsage | None] = []
-
-        def parse(body: JsonValue, metadata: ResponseMetadata) -> T:
-            answers = _parse_answers(body, metadata)
-            usage.append(answers.usage)
-            return interpret(answers, metadata)
-
+        # Reuse v1's wire parsing/error classification, but never construct its
+        # UTC-ordered CallEvent. New-engine accounting measures actual attempts
+        # directly with the ledger's monotonic clock.
         client = ModelClient[T](
             _client_config(self._key(), self.endpoint), http_client=self._http_client,
         )
+        payload = redact_json(
+            {"state": state, "model": self.model, "questions": questions},
+            policy=PrivacyPolicy(),
+        )
         started = time.monotonic()
         try:
-            parsed = await client.request_json(
-                request_model=self.model,
-                payload={"state": state, "model": self.model, "questions": questions},
-                context=self._context(scope), parser=parse,
-            )
-        except ProviderError as error:
-            raise _unavailable(error) from None
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                remaining = scope.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise JevUnavailable("timeout")
+                scope.reserve_attempt()
+                call_id = uuid4().hex
+                sent_at = scope.ledger.clock()
+                usage: CallUsage | None = None
+                resolved_model: str | None = None
+                error: ProviderError | None = None
+                outcome = "failed"
+                try:
+                    response = await client._http.post(
+                        self.endpoint,
+                        headers={
+                            "Authorization": f"Bearer {client.config.api_key}",
+                            "Content-Type": "application/json", "User-Agent": "JevPilot/0.1.0",
+                        },
+                        json=payload, timeout=remaining,
+                    )
+                    body = client._parse_body(response)
+                    usage = client._usage(body)
+                    resolved_model = client._response_model(body)
+                    metadata = ResponseMetadata(call_id, resolved_model, usage, response.status_code)
+                    if not response.is_success:
+                        raise client._http_error(
+                            call_id=call_id, status_code=response.status_code,
+                            retry_after=response.headers.get("Retry-After"),
+                        )
+                    try:
+                        parsed = interpret(_parse_answers(body, metadata), metadata)
+                    except ValidationError:
+                        raise _invalid(metadata) from None
+                    outcome = "ok"
+                    return parsed, usage, time.monotonic() - started
+                except httpx2.TransportError as failure:
+                    error = ProviderError(
+                        kind="transport_timeout" if isinstance(failure, httpx2.TimeoutException) else "provider_unavailable",
+                        call_id=call_id, retryable=True, message="Jev transport failed",
+                    )
+                except ProviderError as failure:
+                    error = failure
+                except anyio.get_cancelled_exc_class():
+                    outcome = "cancelled"
+                    raise
+                finally:
+                    price = PRICES.get(("jev", resolved_model or self.model))
+                    scope.record_call(CallRecord(
+                        call_id=call_id, span_id=scope.parent_span_id,
+                        kind="jev", provider="jev", auth_mode="api", purpose="normal",
+                        request_model=self.model, resolved_model=resolved_model,
+                        attempts=attempt, outcome=outcome,
+                        error_kind=error.kind if error else ("cancelled" if outcome == "cancelled" else None),
+                        usage=LedgerUsage(
+                            input_tokens=usage.input_tokens if usage else None,
+                            output_tokens=usage.output_tokens if usage else None,
+                            cached_input_tokens=usage.cache_read_tokens if usage else None,
+                        ),
+                        api_estimate_usd=_estimate_cost(resolved_model or self.model, usage),
+                        price_source=price.source_url if price else None,
+                        price_checked_on=price.checked_on if price else None,
+                        latency_s=scope.ledger.clock() - sent_at,
+                    ))
+                    if self.on_call is not None:
+                        self.on_call(scope.ledger.calls[-1])
+                assert error is not None
+                if not error.retryable or attempt == MAX_ATTEMPTS:
+                    raise _unavailable(error)
+                delay = error.retry_after_seconds
+                if delay is None:
+                    delay = 0.25 * (1 << (attempt - 1))
+                if delay >= scope.deadline - time.monotonic():
+                    raise _unavailable(error)
+                if delay:
+                    await anyio.sleep(delay)
+            raise AssertionError("attempt loop must return or raise")
         finally:
-            await client.aclose()
-        return parsed, usage[-1], time.monotonic() - started
+            with anyio.CancelScope(shield=True):
+                await client.aclose()
 
     async def choose(
         self, state: SelectorState, *, scope: CallScope,
@@ -530,32 +574,30 @@ async def validate_key(
     """One minimal two-option choice request: 2xx passes, otherwise JevUnavailable."""
     target = endpoint or _setting("JEVPILOT_JEV_ENDPOINT", JEV_ENDPOINT)
     request_model = model or _setting("JEVPILOT_JEV_MODEL", JEV_MODEL)
-    context = CallContext(
-        run_id="key-check", logical_call_id="key-check", role="selector", purpose="normal",
-        deadline=time.monotonic() + 30.0, max_attempts=1,
-        reserve_attempt=lambda: None, record_call=lambda _event: None,
-    )
     client = ModelClient[None](_client_config(key, target), http_client=http_client)
     try:
-        _ = await client.request_json(
-            request_model=request_model,
-            payload={
+        response = await client._http.post(
+            target, headers={"Authorization": f"Bearer {key}"},
+            json={
                 "state": {"goal": "key check"}, "model": request_model,
                 "questions": {"check": _choice_question("Choose a.", {"a": None, "b": None})},
             },
-            context=context, parser=lambda _body, _metadata: None,
+            timeout=30,
         )
+        if not response.is_success:
+            raise client._http_error(
+                call_id=uuid4().hex, status_code=response.status_code,
+                retry_after=response.headers.get("Retry-After"),
+            )
+    except httpx2.TransportError as error:
+        raise JevUnavailable(
+            "timeout" if isinstance(error, httpx2.TimeoutException) else "provider_unavailable",
+        ) from None
     except ProviderError as error:
-        # The JSON transport rejects empty/non-JSON bodies after accepting HTTP 2xx.
-        # Key validation depends only on that authenticated status, not the body.
-        if (
-            error.kind == "invalid_response" and error.status_code is not None
-            and 200 <= error.status_code < 300
-        ):
-            return
         raise _unavailable(error) from None
     finally:
-        await client.aclose()
+        with anyio.CancelScope(shield=True):
+            await client.aclose()
 
 
 def _smoke_state() -> SelectorState:

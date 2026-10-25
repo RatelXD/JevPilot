@@ -117,6 +117,8 @@ def _element(
         tag=node.tag_name, role=_role(node),
         text=_text(node) or attrs.get("aria-label", "") or (node.ax_node.name or "" if node.ax_node else ""),
         attributes=attrs, in_viewport=in_viewport,
+        has_onclick="onclick" in node.attributes,
+        contenteditable=node.attributes.get("contenteditable", "false") != "false",
         form_key=str(form.backend_node_id) if form is not None else None,
         form_has_password=any(
             field.attributes.get("type") == "password"

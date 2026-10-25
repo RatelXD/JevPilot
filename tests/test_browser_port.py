@@ -80,6 +80,28 @@ def test_conversion_when_attributes_and_text_are_untrusted() -> None:
     assert result.options == []
 
 
+@pytest.mark.parametrize(
+    "attrs,onclick,editable",
+    [
+        ({"onclick": "run()"}, True, False),
+        ({"contenteditable": "true"}, False, True),
+        ({"contenteditable": ""}, False, True),
+        ({"contenteditable": "false"}, False, False),
+        ({}, False, False),
+    ],
+)
+def test_capabilities_when_div_has_onclick_or_contenteditable(
+    attrs: dict[str, str], onclick: bool, editable: bool,
+) -> None:
+    # Given
+    target = node("div", attrs=attrs)
+    # When
+    result = ref(target)
+    # Then
+    assert (result.has_onclick, result.contenteditable) == (onclick, editable)
+    assert "onclick" not in result.attributes and "contenteditable" not in result.attributes
+
+
 def test_input_values_when_snapshot_contains_live_private_text() -> None:
     # Given
     target = node("input", attrs={"type": "password", "value": "PRIVATE"})

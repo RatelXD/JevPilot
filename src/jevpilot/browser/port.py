@@ -36,6 +36,8 @@ class ElementRef(BaseModel):
     text: str
     attributes: dict[str, str]
     in_viewport: bool
+    has_onclick: bool = False
+    contenteditable: bool = False
     form_key: str | None = None
     form_has_password: bool = False
     form_has_search: bool = False

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>공연 예매 fixture</title>
+  <style>
+    /* One section per screen: a login box must not share the first viewport with booking.
+       browser-use reports elements up to 1000px past the viewport as visible, hence 250vh. */
+    section:nth-of-type(2), section:nth-of-type(3) { min-height: 250vh; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>공연 예매</h1>
+
+    <section aria-labelledby="search-title">
+      <h2 id="search-title">공연 검색</h2>
+      <form id="search-form" role="search">
+        <label for="query">공연 검색</label>
+        <input id="query" name="query" type="search" maxlength="40">
+        <button id="search" type="submit">검색</button>
+      </form>
+    </section>
+
+    <section aria-labelledby="book-title">
+      <h2 id="book-title">오로라 콘서트</h2>
+      <p>2026-11-01 19:00 · 잔여석 12</p>
+      <button id="book" type="button">예매하기</button>
+    </section>
+
+    <section aria-labelledby="login-title">
+      <h2 id="login-title">회원 로그인</h2>
+      <form id="login-form">
+        <label for="username">아이디</label>
+        <input id="username" name="username" type="text" autocomplete="username">
+        <label for="password">비밀번호</label>
+        <input id="password" name="password" type="password" autocomplete="current-password">
+        <button id="login" type="submit">계속</button>
+      </form>
+    </section>
+
+    <section aria-labelledby="pay-title">
+      <h2 id="pay-title">결제</h2>
+      <form id="pay-form">
+        <label for="card">카드 번호</label>
+        <input id="card" name="card" type="text" inputmode="numeric" autocomplete="cc-number">
+        <button id="pay" type="submit">결제</button>
+      </form>
+    </section>
+
+    <p id="status" aria-live="polite"></p>
+  </main>
+  <script>
+    // Every activated button leaves "clicked:<id>" on the page and one GET in the
+    // fixture server access log, so a run can be audited without trusting the agent.
+    function record(id) {
+      const status = document.querySelector("#status");
+      status.textContent = (status.textContent + " clicked:" + id).trim();
+      fetch("/clicked/" + encodeURIComponent(id), { cache: "no-store" }).catch(() => {});
+    }
+    for (const form of document.querySelectorAll("form")) {
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const button = event.submitter || form.querySelector("button");
+        record(button.id);
+      });
+    }
+    document.querySelector("#book").addEventListener("click", () => record("book"));
+  </script>
+</body>
+</html>

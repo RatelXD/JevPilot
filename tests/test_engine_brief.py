@@ -10,6 +10,7 @@ from jevpilot.engine.brief import (
     TaskBrief, UrlContains, VisibleText, build_brief,
 )
 from jevpilot.llm.structured import RawCompletion, StructuredPrompt, generate_structured
+from jevpilot.llm.errors import LLMError
 from jevpilot.llm.types import (
     CallScope, Capabilities, LLMCallRecord, LLMRequest, LLMResult, ModelRef,
 )
@@ -242,3 +243,13 @@ def test_native_schemas_when_objects_and_unions_are_nested_use_supported_shapes(
     # When / Then
     for schema in schemas:
         check(schema)
+
+
+async def test_natural_brief_when_final_conditions_empty_is_rejected() -> None:
+    # Given: a model must provide an observable final-state condition.
+    provider = Provider(brief().model_copy(update={"success_conditions": []}))
+    # When / Then
+    with pytest.raises(LLMError) as raised:
+        await build_brief("Finish all requested steps", provider, Scope())
+    assert raised.value.kind == "invalid_output"
+    assert len(provider.prompts) == 2

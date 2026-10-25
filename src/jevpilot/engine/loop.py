@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 from pathlib import Path
+import re
 import time
 from typing import Literal, Protocol, override, runtime_checkable
 
 import anyio
+from pydantic import JsonValue
 
 from jevpilot.browser.port import BrowserAction, BrowserConfig, BrowserPort, NavigationWaiter, Observation
-from jevpilot.engine.assist import llm_choose, llm_extract, llm_replan, llm_text
-from jevpilot.engine.brief import Extraction, OpenedTarget, StructuredTask, TaskBrief, build_brief
+from jevpilot.engine.assist import llm_choose, llm_extract, llm_replan, llm_text, supplied_input_key
+from jevpilot.engine.brief import AnswerFields, Extraction, FieldValue, OpenedTarget, StructuredTask, TaskBrief, build_brief
+from jevpilot.engine.candidates import build_candidates
 from jevpilot.engine.control import InteractiveControl, NeedsUser, RunControl, RunStopped, ScriptedControl
 from jevpilot.engine.jev import GoalContext, JevSelector, JevUnavailable, select_step
 from jevpilot.engine.recovery import FailureSignals, StepRecord, classify, may_execute, plan_recovery, record_step
 from jevpilot.engine.routing import Route, RoutingHistory, RoutingPolicy, RoutingSignals, route
 from jevpilot.engine.safety import assess
-from jevpilot.engine.verify import OpenEvidence, _normalize, verify
+from jevpilot.engine.verify import OpenEvidence, VerifyResult, _normalize, verify
 from jevpilot.ledger.models import CallRecord, CallUsage, RunSummary
 from jevpilot.ledger.recorder import CallScope as LedgerScope, RunLedger
 from jevpilot.ledger.sink import LedgerSink
@@ -115,6 +119,7 @@ async def run_task(
     history = RoutingHistory()
     records: list[StepRecord] = []
     opened: list[OpenEvidence] = []
+    observed_pages: list[Observation] = []
     in_handoff = False
     original = goal if isinstance(goal, str) else goal.model_dump_json()
     goal_context: GoalContext = GoalContext(original)
@@ -139,15 +144,86 @@ async def run_task(
 
     async def observe() -> Observation:
         with ledger.span("observe"):
-            return await browser.observe()
+            observed = await browser.observe()
+            if not any(
+                page.url == observed.url and page.page_text == observed.page_text
+                for page in observed_pages
+            ):
+                observed_pages.append(observed.model_copy(update={"elements": []}))
+                del observed_pages[:-8]
+            # The adapter's page fingerprint omits private input text. Retained
+            # lengths still prove a changed field state without exposing values.
+            lengths = sorted(
+                (field.backend_node_id, field.attributes.get("value"))
+                for field in build_candidates(observed).type_text
+            )
+            return observed.model_copy(update={"fingerprint": hashlib.sha256(
+                f"{observed.fingerprint}:{lengths!r}".encode(),
+            ).hexdigest()})
 
     async def handoff(why: str) -> None:
         nonlocal in_handoff
         opened.clear()
+        observed_pages.clear()
         # No observation or event is produced while control owns the browser.
         in_handoff = True
         await control.handoff(why)
         in_handoff = False
+
+    def verification() -> VerifyResult:
+        """Keep final-state claims current; ground comparison items per observed page."""
+        if brief is None or brief.comparison is None or extraction is None or observation is None:
+            return verify(observation, brief, extraction, opened=tuple(opened))
+        current = verify(observation, brief.model_copy(update={
+            "comparison": None,
+            "success_conditions": [
+                *brief.success_conditions, AnswerFields(names=[brief.comparison.field]),
+            ],
+        }), extraction, opened=tuple(opened))
+        if current.status != "PASS" or extraction.no_result:
+            return current
+        sources: list[JsonValue] = []
+        grounded_items: list[FieldValue] = []
+        for item in extraction.compared_items:
+            quote, value = _normalize(item.quote), _normalize(item.value)
+            # Compared quotes may name an item whose observed list label was
+            # truncated. The numeric value and name must share one observed page.
+            name = quote.replace(value, "").strip(" :;-—–") if value and quote.count(value) == 1 else ""
+
+            def grounded(page: Observation) -> bool:
+                text = _normalize(page.page_text)
+                if not quote or not value or value not in text:
+                    return False
+                if quote in text and value in quote:
+                    return True
+                if not name:
+                    return False
+                if name in text:
+                    return True
+                if len(name) < 10:
+                    return False
+                return any(
+                    len(match.group()[:-3].rstrip()) >= 10
+                    and name.casefold().startswith(match.group()[:-3].rstrip())
+                    for match in re.finditer(
+                        r"(?<!\w)" + re.escape(name[:10].casefold()) + r".*?\.{3}",
+                        text.casefold(),
+                    )
+                )
+
+            source = next((
+                page for page in observed_pages if grounded(page)
+            ), None)
+            if source is None:
+                return VerifyResult("FAIL", "compared_item_not_grounded")
+            sources.append(source.url)
+            # Only the code-checked numeric field reaches the extrema verifier.
+            # Keep the original extraction, quotes and source URLs in the ledger.
+            grounded_items.append(item.model_copy(update={"quote": value}))
+        ledger.event("recovery", {"event": "comparison_sources", "sources": sources})
+        return verify(observation.model_copy(update={
+            "page_text": "\n".join(page.page_text for page in observed_pages),
+        }), brief, extraction.model_copy(update={"compared_items": grounded_items}), opened=tuple(opened))
 
     async def interpret() -> None:
         nonlocal brief
@@ -181,13 +257,13 @@ async def run_task(
         goal_context = replace(
             goal_context, brief=brief.model_dump_json(), subgoal=brief.goal_restated,
         )
-        while brief.missing_inputs:
-            key = brief.missing_inputs[0]
+        while "start_url" in brief.missing_inputs:
+            key = "start_url"
             with ledger.span("wait", "missing_input"):
                 answer = await control.ask(key)
             brief = brief.model_copy(update={
                 "input_values": {**brief.input_values, key: answer},
-                "missing_inputs": brief.missing_inputs[1:],
+                "missing_inputs": [name for name in brief.missing_inputs if name != key],
                 "start_url": answer if key == "start_url" else brief.start_url,
             })
         observation = await observe()
@@ -211,7 +287,7 @@ async def run_task(
                 chosen = None
                 assisted_state = None
             with ledger.span("verify"):
-                verified = verify(observation, brief, extraction, opened=tuple(opened))
+                verified = verification()
             if verified.status == "PASS":
                 terminal.status, terminal.reason = "verified", verified.reason
                 return
@@ -222,7 +298,7 @@ async def run_task(
                 raise _Limit("wall_limit")
             if steps >= policy.max_steps:
                 raise _Limit("step_limit")
-            failure = classify(None, verified, FailureSignals(observation, brief=brief), [])
+            failure = classify(None, verified, FailureSignals(observation), [])
             if failure is not None:
                 recovery = plan_recovery(failure)
                 if recovery.action == "stop_blocked":
@@ -249,13 +325,7 @@ async def run_task(
             key: str | None = None
             if action is not None and action.kind == "type_text" and action.target is not None:
                 target = action.target
-                key = next((
-                    name for name in (
-                        target.attributes.get("name"), target.attributes.get("id"),
-                        target.attributes.get("aria-label"), target.attributes.get("placeholder"),
-                        f"{observation.url}#{target.backend_node_id}",
-                    ) if name in brief.input_values
-                ), None)
+                key = supplied_input_key(target, observation, brief)
                 if key is None:
                     key = f"{observation.url}#{target.backend_node_id}"
                 if key in brief.input_values:
@@ -268,6 +338,17 @@ async def run_task(
                 selected = route(RoutingSignals(
                     observation, decision, input_key=key, subgoal=goal_context.subgoal,
                     verification=verified,
+                    input_binding_unique=isinstance(goal, StructuredTask) and key in brief.input_values
+                    and sum(
+                        supplied_input_key(candidate, observation, brief) == key
+                        for candidate in build_candidates(observation).type_text
+                    ) == 1,
+                    structured_navigation=isinstance(goal, StructuredTask)
+                    and action is not None and action.kind == "click"
+                    and action.target in build_candidates(observation).click
+                    and action.target is not None
+                    and action.target.attributes.get("type") != "submit"
+                    and assess(action, observation).verdict == "allow",
                 ), brief, history, ledger=ledger, policy=policy)
             state = (observation.url, observation.fingerprint)
             if assisted_state == state:
@@ -298,12 +379,26 @@ async def run_task(
                 case "ask_user":
                     if selected.reason.endswith("_limit"):
                         raise _Limit(selected.reason)
+                    if action is not None and (safety := assess(action, observation)).verdict == "handoff":
+                        await handoff(safety.reason)
+                        observation = await observe()
+                        continue
                     if mode == "jev_only":
                         terminal.status, terminal.reason = "failed", selected.reason
                         return
                     with ledger.span("wait", "ask_user"):
-                        hint = await control.ask(selected.reason)
-                    goal_context = replace(goal_context, subgoal=hint)
+                        question = brief.missing_inputs[0] if selected.reason == "missing_inputs" else selected.reason
+                        hint = await control.ask(question)
+                    if selected.reason == "missing_inputs":
+                        brief = brief.model_copy(update={
+                            "input_values": {
+                                **brief.input_values, question: hint,
+                                **({key: hint} if key is not None else {}),
+                            },
+                            "missing_inputs": brief.missing_inputs[1:],
+                        })
+                    else:
+                        goal_context = replace(goal_context, subgoal=hint)
                     assisted_state = state
                     observation = await observe()
                     continue
@@ -328,12 +423,23 @@ async def run_task(
                                         "input_values": {**brief.input_values, key: value.value},
                                     })
                             case "llm_choose":
-                                chosen = await llm_choose(observation, brief, provider=llm, context=scope())
+                                chosen = await llm_choose(
+                                    observation, brief, provider=llm, context=scope(),
+                                    recent_actions=goal_context.recent_actions,
+                                )
                             case "llm_replan":
                                 patch = await llm_replan(observation, goal_context, provider=llm, context=scope())
                                 goal_context = patch.apply(goal_context)
                             case "llm_extract":
-                                extraction = await llm_extract(observation, brief, provider=llm, context=scope())
+                                extraction = await llm_extract(
+                                    observation, brief, provider=llm, context=scope(),
+                                    observed_pages=tuple(observed_pages),
+                                )
+                                ledger.event("recovery", {
+                                    "event": "extraction_response",
+                                    "url": observation.url,
+                                    "raw_output": extraction.model_dump_json(),
+                                })
                     assisted_state = state
                     observation = await observe()
                     continue

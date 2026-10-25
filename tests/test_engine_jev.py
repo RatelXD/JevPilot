@@ -11,6 +11,8 @@ from pydantic import JsonValue, TypeAdapter
 from jevpilot.browser.port import ElementRef, Observation, Option
 from jevpilot.engine.jev import JevSelector, JevUnavailable, SelectorState, validate_key
 from jevpilot.ledger import CallRecord, RunLedger
+from jevpilot.ledger.sink import LedgerSink
+from pathlib import Path
 
 KEY = "synthetic-jev-key-12345"
 
@@ -428,3 +430,55 @@ async def test_success_when_reporter_fails_does_not_send_again() -> None:
     assert len(sent) == len(ledger.calls) == 1
     assert ledger.calls[0].outcome == "ok"
     assert ledger.calls[0].api_estimate_usd == Decimal("0.000042")
+
+
+@pytest.mark.parametrize("distribution,accepted", [
+    ({"0": 0.66, "1": 0.33}, True),
+    ({"0": 0.33, "1": 0.32, "2": 0.32}, False),
+    ({"0": 0.666, "1": 0.333}, False),
+    ({"0": 0.666666, "1": 0.333334}, True),
+    ({"0": 0.78, "1": 0.15000000000000002, "2": 0.060000000000000005}, True),
+    ({"0": 0.78, "1": 0.15, "2": 0.065}, False),
+])
+async def test_native_rounding_when_bounded_preserves_raw_and_normalizes(
+    tmp_path: Path, distribution: dict[str, float], accepted: bool,
+) -> None:
+    # Given: exercise the native option head without zero-probability padding.
+    target = element(5, "select", options=[
+        Option(value=key, label=key) for key in distribution
+    ])
+    sink = LedgerSink("rounding", root=tmp_path)
+    ledger = RunLedger(sink=sink)
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=body_for({
+            "option": answer("0", distribution),
+        }))
+
+    # When / Then
+    async with client_for(handler) as http:
+        selector = JevSelector(api_key=KEY, http_client=http)
+        if accepted:
+            choice = await selector.choose_option(
+                state_of([target]), target, scope=ledger.scope(deadline=float("inf")),
+            )
+            assert choice.margin == pytest.approx(
+                (distribution["0"] - distribution["1"]) / sum(distribution.values()),
+            )
+            events = [
+                TypeAdapter(dict[str, JsonValue]).validate_json(line)
+                for line in (sink.directory / "events.jsonl").read_text().splitlines()
+            ]
+            raw = next(
+                event["data"] for event in events
+                if isinstance(event["data"], dict) and event["data"].get("event") == "jev_response"
+            )
+            assert isinstance(raw, dict) and isinstance(raw["answers"], dict)
+            option = raw["answers"]["option"]
+            assert isinstance(option, dict) and option["probabilities"] == distribution
+        else:
+            with pytest.raises(JevUnavailable):
+                await selector.choose_option(
+                    state_of([target]), target, scope=ledger.scope(deadline=float("inf")),
+                )
+            assert ledger.calls[0].error_kind == "invalid_response"

@@ -37,7 +37,9 @@ def _compile(phrases: tuple[str, ...]) -> re.Pattern[str]:
     parts: list[str] = []
     for phrase in phrases:
         body = re.escape(phrase).replace(r"\ ", r"\s+")
-        parts.append(body if not phrase.isascii() else rf"(?<![a-z]){body}s?(?![a-z])")
+        # "Book" is a booking imperative; its plural "books" is a catalog noun.
+        suffix = "" if phrase == "book" else "s?"
+        parts.append(body if not phrase.isascii() else rf"(?<![a-z]){body}{suffix}(?![a-z])")
     return re.compile("|".join(parts), re.IGNORECASE)
 
 

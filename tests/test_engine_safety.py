@@ -58,6 +58,19 @@ def test_neutral_or_lookalike_text_is_allowed(text: str) -> None:
     assert verdict(el(text)) == "allow"
 
 
+@pytest.mark.parametrize("label,href", [
+    ("Books", "/catalog/books/"),
+    ("Travel", "/catalog/category/books/travel/index.html"),
+])
+def test_book_noun_when_browsing_catalog_is_not_booking(label: str, href: str) -> None:
+    # Given
+    target = el(label, tag="a", attributes={"href": href})
+    # When
+    result = assess(BrowserAction(kind="click", target=target), OBS)
+    # Then
+    assert result.verdict == "allow"
+
+
 def test_search_form_button_is_not_a_mutation() -> None:
     assert verdict(el("예약 조회", form_has_search=True)) == "allow"
 

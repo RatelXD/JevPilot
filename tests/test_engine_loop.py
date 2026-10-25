@@ -14,7 +14,7 @@ from pydantic import JsonValue, TypeAdapter
 
 from jevpilot.browser.port import BrowserAction, BrowserConfig, ElementRef, ExecutionResult, Observation, Option
 from jevpilot.engine.assist import ActionChoice, PlanPatch, TextValue
-from jevpilot.engine.brief import AnswerFields, Extraction, FieldValue, OpenedTarget, StructuredTask, TaskBrief, VisibleText
+from jevpilot.engine.brief import AnswerFields, Comparison, Extraction, FieldValue, OpenedTarget, StructuredTask, TaskBrief, VisibleText
 from jevpilot.engine.control import InteractiveControl, RunControl, ScriptedControl
 from jevpilot.engine.jev import JevSelector
 from jevpilot.engine.loop import RunOutcome, run_task
@@ -93,6 +93,7 @@ class Provider:
         self.ref: ModelRef = ModelRef("openai", "api", "gpt-5.3-codex")
         self.replies: list[str] = list(replies or [])
         self.purposes: list[str] = []
+        self.payloads: list[JsonValue] = []
         self.closed: bool = False
         self.interrupted: bool = False
         self.started: anyio.Event = anyio.Event()
@@ -103,6 +104,7 @@ class Provider:
 
     async def generate[T](self, request: LLMRequest[T], context: CallScope) -> LLMResult[T]:
         self.purposes.append(request.purpose)
+        self.payloads.append(request.user_payload)
 
         async def send(_prompt: StructuredPrompt) -> RawCompletion:
             assert isinstance(context, LedgerScope)
@@ -128,6 +130,7 @@ class Provider:
 class Pick:
     operation: str = "click"
     confidence: float = 1
+    target_confidence: float | None = None
 
 
 def wire(picks: list[Pick], seen: list[dict[str, JsonValue]], *, status: int = 200) -> httpx2.MockTransport:
@@ -145,7 +148,10 @@ def wire(picks: list[Pick], seen: list[dict[str, JsonValue]], *, status: int = 2
             assert isinstance(criteria, dict)
             selected = pick.operation if name == "operation" else next(iter(criteria))
             answers[name] = {
-                "type": "choice", "choice": selected, "confidence": pick.confidence,
+                "type": "choice", "choice": selected, "confidence": (
+                    pick.target_confidence if name != "operation" and pick.target_confidence is not None
+                    else pick.confidence
+                ),
                 "probabilities": {key: float(key == selected) for key in criteria},
             }
         return httpx2.Response(200, json={
@@ -280,7 +286,7 @@ async def test_missing_inputs_when_answered_are_supplied_to_jev(tmp_path: Path) 
 
     async def engine() -> None:
         results.append(await run(
-            tmp_path, browser, provider, [Pick("type_text")], goal="Finish task", control=control,
+            tmp_path, browser, provider, [Pick("type_text")] * 2, goal="Finish task", control=control,
         ))
 
     # When
@@ -292,6 +298,81 @@ async def test_missing_inputs_when_answered_are_supplied_to_jev(tmp_path: Path) 
     # Then
     assert results[0][0].status == "verified"
     assert browser.actions[0].value == "Aurora" and provider.purposes == ["brief"]
+    assert len(results[0][2]) == 2  # Select before asking, then reselect the fresh field.
+
+
+@pytest.mark.parametrize("label,status,reason", [
+    ("Reserve", "failed", "confirmation_denied"),
+    ("Sign in", "handoff_ended", "needs_user"),
+    ("Pay now", "handoff_ended", "needs_user"),
+])
+async def test_pending_inputs_when_guarded_action_ready_reach_guard_first(
+    tmp_path: Path, label: str, status: str, reason: str,
+) -> None:
+    # Given: future form details are not prerequisites for reaching a guard.
+    provider = Provider([BRIEF.model_copy(update={
+        "missing_inputs": ["details needed later"],
+    }).model_dump_json()])
+    browser = Browser([page(label=label)])
+    # When
+    result, _, _ = await run(tmp_path, browser, provider, [Pick()], goal="Continue")
+    # Then
+    assert (result.status, result.reason) == (status, reason)
+    assert browser.actions == []
+
+
+@pytest.mark.parametrize("attributes", [
+    {"autocomplete": "cc-number"}, {"aria-label": "Card Number"},
+])
+async def test_sensitive_input_when_value_missing_hands_off_before_asking(
+    tmp_path: Path, attributes: dict[str, str],
+) -> None:
+    # Given: the live route requested payment information before its guard ran.
+    initial = page(tag="input")
+    initial = initial.model_copy(update={"elements": [
+        initial.elements[0].model_copy(update={"attributes": attributes}),
+    ]})
+    provider = Provider([BRIEF.model_copy(update={
+        "missing_inputs": ["payment information"],
+    }).model_dump_json()])
+    browser = Browser([initial])
+    # When
+    result, _, _ = await run(
+        tmp_path, browser, provider, [Pick("type_text", 0.69)],
+        goal="Continue payment",
+    )
+    # Then
+    assert result.status == "handoff_ended" and result.reason == "needs_user"
+    assert provider.purposes == ["brief"] and browser.actions == []
+
+
+async def test_input_length_progress_when_page_text_unchanged_allows_next_assistance(
+    tmp_path: Path,
+) -> None:
+    # Given: private input text is retained only as a length by the BrowserPort.
+    empty = page(tag="input")
+    filled = empty.model_copy(update={"elements": [
+        empty.elements[0].model_copy(update={"attributes": {"id": "query", "value": "6"}}),
+    ]})
+    browser = Browser([empty, filled, page("Complete")])
+    provider = Provider([
+        BRIEF.model_dump_json(),
+        TextValue(value="secret", rationale="supplied").model_dump_json(),
+        ActionChoice(operation="type_text", target_index=1, option_value=None).model_dump_json(),
+    ])
+    # When
+    result, _, _ = await run(
+        tmp_path, browser, provider,
+        [Pick("type_text"), Pick("type_text"), Pick("type_text", 0.5), Pick("type_text", 0.5)],
+        goal="Complete the fields",
+    )
+    # Then
+    assert result.status == "verified"
+    assert provider.purposes == ["brief", "text", "choose"]
+    assert len(browser.actions) == 2
+    choice_payload = provider.payloads[-1]
+    assert isinstance(choice_payload, dict)
+    assert choice_payload["recent_actions"] == ["type_text target=10 outcome=executed"]
 
 
 async def test_confirmation_when_denied_never_dispatches(tmp_path: Path) -> None:
@@ -442,11 +523,13 @@ async def test_extraction_when_quotes_checked_in_code_cannot_invent_success(
     provider = Provider([Extraction(
         fields={"year": FieldValue(value="1397", quote="Year 1397" if grounded else "Fake 1397")},
         no_result=False, no_result_quote=None, compared_items=[],
-    ).model_dump_json()])
+    ).model_dump_json()] * 2)
     # When
     result, _, _ = await run(tmp_path, Browser([page("Year 1397")]), provider, [Pick("done")], goal=task)
     # Then
-    assert result.status == ("verified" if grounded else "unverified")
+    assert result.status == ("verified" if grounded else "failed")
+    if not grounded:
+        assert result.reason == "llm_invalid_output" and result.receipt.by_kind["llm"].calls == 2
     assert provider.purposes == ["extract"]
 
 
@@ -460,6 +543,89 @@ async def test_choose_when_supported_rebinds_after_new_jev_selection(tmp_path: P
     assert result.status == "verified" and len(seen) == 2
     assert browser.actions[0].target is not None
     assert provider.purposes == ["choose"] and browser.actions[0].target.snapshot_id == "s3"
+
+
+async def test_structured_supplied_field_when_unique_needs_no_llm(tmp_path: Path) -> None:
+    # Given: the DOM binding determines the sole supplied field, not a score override.
+    browser = Browser([page(tag="input"), page("Complete")])
+    provider = Provider([
+        ActionChoice(operation="type_text", target_index=1, option_value=None).model_dump_json(),
+    ])
+    task = TASK.model_copy(update={"input_values": {"query": "supplied"}})
+    # When
+    result, ledger, _ = await run(
+        tmp_path, browser, provider, [Pick("type_text", 0.5, 1)] * 2, goal=task,
+    )
+    # Then
+    assert result.status == "verified"
+    assert browser.actions[0].value == "supplied"
+    assert provider.purposes == [] and ledger.summary().by_kind["llm"].calls == 0
+
+
+@pytest.mark.parametrize("natural,duplicate", [(True, False), (False, True)])
+async def test_supplied_field_when_binding_not_structurally_unique_keeps_assistance(
+    tmp_path: Path, natural: bool, duplicate: bool,
+) -> None:
+    # Given: neither natural interpretation nor duplicate DOM identifiers proves uniqueness.
+    initial = page(tag="input")
+    if duplicate:
+        initial = initial.model_copy(update={"elements": [
+            *initial.elements,
+            initial.elements[0].model_copy(update={"index": 2, "backend_node_id": 20}),
+        ]})
+    brief = BRIEF.model_copy(update={"input_values": {"query": "supplied"}})
+    provider = Provider([
+        *([brief.model_dump_json()] if natural else []),
+        ActionChoice(operation="type_text", target_index=1, option_value=None).model_dump_json(),
+    ])
+    browser = Browser([initial, page("Complete")])
+    # When
+    result, _, _ = await run(
+        tmp_path, browser, provider, [Pick("type_text", 0.5)] * 2,
+        goal="Finish task" if natural else TASK.model_copy(update={"input_values": brief.input_values}),
+    )
+    # Then
+    assert result.status == "verified" and browser.actions[0].value == "supplied"
+    assert provider.purposes == (["brief", "choose"] if natural else ["choose"])
+
+
+@pytest.mark.parametrize("next_pick", ["click", "type_text"])
+async def test_chosen_type_when_supplied_value_exists_keeps_matching_value(
+    tmp_path: Path, next_pick: str,
+) -> None:
+    # Given: the fresh Jev action need not target the field chosen by assistance.
+    initial = page(tag="input")
+    button = page().elements[0].model_copy(update={"index": 2, "backend_node_id": 20})
+    initial = initial.model_copy(update={"elements": [*initial.elements, button]})
+    browser = Browser([initial, page("Complete")])
+    provider = Provider([
+        ActionChoice(operation="type_text", target_index=1, option_value=None).model_dump_json(),
+    ])
+    task = TASK.model_copy(update={"input_values": {"query": "supplied"}})
+    # When
+    result, _, _ = await run(
+        tmp_path, browser, provider, [Pick("click", 0.5), Pick(next_pick, 0.5)], goal=task,
+    )
+    # Then
+    assert result.status == "verified"
+    assert provider.purposes == ["choose"]
+    assert browser.actions[0].kind == "type_text" and browser.actions[0].value == "supplied"
+
+
+async def test_answer_when_confident_navigation_pending_executes_before_extraction(tmp_path: Path) -> None:
+    # Given: only the destination contains the requested evidence.
+    browser = Browser([page("Read the details"), page("Year 1397")])
+    provider = Provider([Extraction(
+        fields={"year": FieldValue(value="1397", quote="Year 1397")},
+        no_result=False, no_result_quote=None, compared_items=[],
+    ).model_dump_json()])
+    task = TASK.model_copy(update={"success_conditions": [AnswerFields(names=["year"])]})
+    # When
+    result, _, _ = await run(tmp_path, browser, provider, [Pick(), Pick("done")], goal=task)
+    # Then
+    assert result.status == "verified" and result.steps == 1
+    assert [action.kind for action in browser.actions] == ["click"]
+    assert provider.purposes == ["extract"]
 
 
 async def test_receipt_when_clock_overlaps_startup_attributes_time_and_costs(tmp_path: Path) -> None:
@@ -633,3 +799,118 @@ async def test_delayed_open_waits_for_dispatched_navigation_without_second_click
         assert result.reason == "navigation_unsettled"
     assert browser.waited == (outcome == "executed")
     assert len(browser.actions) == 1
+
+
+@pytest.mark.parametrize("natural,tag,label,attributes,target_score,expected", [
+    (False, "a", "Details", {"href": "/detail"}, 0.85, []),
+    (False, "button", "Next", {"type": "button"}, 0.85, []),
+    (True, "a", "Details", {"href": "/detail"}, 0.85, ["brief", "choose"]),
+    (False, "a", "Details", {"href": "/detail"}, 0.849, ["choose"]),
+    (False, "input", "Search", {"id": "query"}, 1.0, ["choose"]),
+])
+async def test_structured_target_when_compatible_uses_target_confidence(
+    tmp_path: Path, natural: bool, tag: str, label: str,
+    attributes: dict[str, str], target_score: float, expected: list[str],
+) -> None:
+    # Given: low operation confidence alone must not force structured navigation assistance.
+    initial = page(tag=tag, label=label)
+    initial = initial.model_copy(update={"elements": [
+        initial.elements[0].model_copy(update={"attributes": attributes}),
+    ]})
+    # A click on an input is not a candidate; use type_text without a supplied value.
+    operation = "type_text" if tag == "input" else "click"
+    provider = Provider([
+        *([BRIEF.model_dump_json()] if natural else []),
+        *([TextValue(value="supplied", rationale="needed").model_dump_json()]
+          if tag == "input" else [
+              ActionChoice(operation="click", target_index=1, option_value=None).model_dump_json(),
+          ]),
+    ])
+    browser = Browser([initial, page("Complete")])
+    # When
+    result, _, _ = await run(
+        tmp_path, browser, provider, [Pick(operation, 0.5, target_score)] * 2,
+        goal="Finish task" if natural else TASK,
+    )
+    # Then
+    assert result.status == "verified"
+    assert provider.purposes == (["text"] if tag == "input" else expected)
+
+
+@pytest.mark.parametrize("observed", [True, False])
+async def test_comparison_when_prior_list_observed_grounds_only_seen_items(
+    tmp_path: Path, observed: bool,
+) -> None:
+    # Given: only the current detail contains the selected answer.
+    listing = page("A $10 B $20" if observed else "A $10")
+    detail = page("B $20").model_copy(update={"url": "https://example.test/detail"})
+    brief = BRIEF.model_copy(update={
+        "success_conditions": [AnswerFields(names=["price"])],
+        "comparison": Comparison(field="price", kind="min"),
+    })
+    # Winner stays current while one compared value exists only in a prior list.
+    detail = detail.model_copy(update={"page_text": "A $10", "fingerprint": "detail"})
+    provider = Provider([brief.model_dump_json(), Extraction(
+        fields={"price": FieldValue(value="$10", quote="A $10")},
+        no_result=False, no_result_quote=None,
+        compared_items=[FieldValue(value="$10", quote="A $10"), FieldValue(value="$20", quote="B $20")],
+    ).model_dump_json()])
+    browser = Browser([listing, detail])
+    # When
+    result, _, _ = await run(
+        tmp_path, browser, provider, [Pick(), Pick("done")], goal="Find the lowest price",
+    )
+    # Then
+    assert result.status == ("verified" if observed else "unverified")
+    events = [
+        TypeAdapter(Event).validate_json(line)["data"]
+        for line in (tmp_path / "loop/events.jsonl").read_text().splitlines()
+    ]
+    if observed:
+        grounding = next(e for e in events if e.get("event") == "comparison_sources")
+        assert listing.url in str(grounding["sources"])
+
+
+@pytest.mark.parametrize("listing_text,accepted", [
+    ("A Journey Through ... $20", True),
+    ("a journey through… $20", True),
+    ("A Journey Through Mountains $20", True),
+    ("An Unrelated Journey ... $20", False),
+    ("A Journey Through ... $30", False),
+    ("A Journey ... $20", False),
+])
+async def test_comparison_when_name_truncated_requires_observed_prefix_and_value(
+    tmp_path: Path, listing_text: str, accepted: bool,
+) -> None:
+    # Given: the losing item's full name is absent from the current detail.
+    listing = page(listing_text)
+    detail = page("Winner $50").model_copy(update={"url": "https://example.test/detail"})
+    brief = BRIEF.model_copy(update={
+        "success_conditions": [AnswerFields(names=["price"])],
+        "comparison": Comparison(field="price", kind="max"),
+    })
+    extraction = Extraction(
+        fields={"price": FieldValue(value="$50", quote="Winner $50")},
+        no_result=False, no_result_quote=None,
+        compared_items=[
+            FieldValue(value="$20", quote="A Journey Through Mountains $20"),
+            FieldValue(value="$50", quote="Winner $50"),
+        ],
+    )
+    provider = Provider([brief.model_dump_json(), extraction.model_dump_json()])
+    # When
+    result, _, _ = await run(
+        tmp_path, Browser([listing, detail]), provider, [Pick(), Pick("done")],
+        goal="Find the highest price",
+    )
+    # Then
+    assert result.status == ("verified" if accepted else "unverified")
+    events = [
+        TypeAdapter(Event).validate_json(line)["data"]
+        for line in (tmp_path / "loop/events.jsonl").read_text().splitlines()
+    ]
+    raw = next(event for event in events if event.get("event") == "extraction_response")
+    assert Extraction.model_validate_json(str(raw["raw_output"])) == extraction
+    if accepted:
+        sources = next(event for event in events if event.get("event") == "comparison_sources")
+        assert listing.url in str(sources["sources"])

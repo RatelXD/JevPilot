@@ -1,14 +1,15 @@
 """Bounded LLM assistance using the caller's selected provider and effort."""
 
 from dataclasses import replace
-from typing import ClassVar, Literal, assert_never
+from typing import ClassVar, Literal, Self, assert_never
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from jevpilot.browser.port import BrowserAction, ElementRef, Observation
 from jevpilot.engine.brief import Extraction, NonBlank, TaskBrief
 from jevpilot.engine.candidates import ActionCandidates, build_candidates
 from jevpilot.engine.jev import GoalContext, select_elements
+from jevpilot.engine.verify import _grounded, _normalize, _number
 from jevpilot.llm.errors import LLMError
 from jevpilot.llm.types import CallScope, LLMProvider, LLMRequest
 
@@ -28,6 +29,13 @@ class ActionChoice(_Model):
     ]
     target_index: int | None = Field(ge=0)
     option_value: str | None
+
+    @model_validator(mode="after")
+    def validate_option(self) -> Self:
+        """Reject option-only data at the repairable structured-output boundary."""
+        if self.operation != "select_option" and self.option_value is not None:
+            raise ValueError("option_value must be null except for select_option")
+        return self
 
     def to_action(self, candidates: ActionCandidates) -> BrowserAction:
         """Bind to the supplied candidate domain, never an index invented by a model."""
@@ -76,6 +84,17 @@ def _domains(observation: Observation) -> ActionCandidates:
     )
 
 
+def supplied_input_key(target: ElementRef, observation: Observation, brief: TaskBrief) -> str | None:
+    """Resolve a field by its observed identifiers, never by its position."""
+    return next((
+        name for name in (
+            target.attributes.get("name"), target.attributes.get("id"),
+            target.attributes.get("aria-label"), target.attributes.get("placeholder"),
+            f"{observation.url}#{target.backend_node_id}",
+        ) if name in brief.input_values
+    ), None)
+
+
 async def llm_text(
     observation: Observation, brief: TaskBrief, target: ElementRef, *,
     provider: LLMProvider, context: CallScope,
@@ -103,6 +122,7 @@ async def llm_text(
 async def llm_choose(
     observation: Observation, brief: TaskBrief, *,
     provider: LLMProvider, context: CallScope,
+    recent_actions: tuple[str, ...] = (),
 ) -> BrowserAction:
     """Return a snapshot-bound action, including the observed select option value."""
     candidates = _domains(observation)
@@ -113,12 +133,20 @@ async def llm_choose(
             "only an index in that operation's candidates. For select_option use "
             "an exact option value from that target. Other operations require null "
             "option_value; operations without a target require null target_index. "
+            "Use the recent executed actions to track progress. Input value "
+            "attributes and retained_input_lengths are character counts, not "
+            "field contents; an already filled field may need no further typing. "
             "Do not execute actions, code, or tools."
         ),
         user_payload={
             "goal": brief.goal_restated,
             "input_values": {name: value for name, value in brief.input_values.items()},
             "page_text": observation.page_text,
+            "recent_actions": list(recent_actions),
+            "retained_input_lengths": {
+                str(element.index): element.attributes.get("value")
+                for element in candidates.type_text
+            },
             "candidates": {
                 op: [e.model_dump(mode="json") for e in candidates.for_operation(op)]
                 for op in ("click", "type_text", "select_option")
@@ -126,7 +154,12 @@ async def llm_choose(
         },
         output_type=ActionChoice,
     ), context)
-    return result.value.to_action(candidates)
+    action = result.value.to_action(candidates)
+    if action.kind == "type_text" and action.target is not None:
+        key = supplied_input_key(action.target, observation, brief)
+        if key is not None:
+            action = action.model_copy(update={"value": brief.input_values[key]})
+    return action
 
 
 async def llm_replan(
@@ -154,8 +187,24 @@ async def llm_replan(
 async def llm_extract(
     observation: Observation, brief: TaskBrief, *,
     provider: LLMProvider, context: CallScope,
+    observed_pages: tuple[Observation, ...] = (),
 ) -> Extraction:
     """Extract claims with evidence; the code-owned verifier alone decides success."""
+    class _ObservedExtraction(Extraction):
+        """Repair malformed claims without weakening the final verifier."""
+
+        @model_validator(mode="after")
+        def validate_observed_fields(self) -> Self:
+            if not self.no_result and not all(
+                _grounded(field, _normalize(observation.page_text)) for field in self.fields.values()
+            ):
+                raise ValueError("fields must contain values and verbatim quotes from the current page; do not reorder or omit words")
+            if brief.comparison is not None and any(
+                _number(item.value) is None for item in self.compared_items
+            ):
+                raise ValueError("compared_items.value must contain only the numeric comparison field, not an item name")
+            return self
+
     result = await provider.generate(LLMRequest(
         purpose="extract",
         system=(
@@ -164,6 +213,10 @@ async def llm_extract(
             "claim needs the page's explicit no-result quote. When comparison is "
             "supplied, include every compared item with its value and quote in "
             "compared_items, not just the winner. Do not execute code or use tools."
+            " Each compared_items.value is only the numeric comparison field, "
+            "with its displayed currency if any; put the item name in quote, not value."
+            " Compared items may quote earlier observed pages, each independently. "
+            "Required answer fields must still quote the current page."
         ),
         user_payload={
             "page_text": observation.page_text,
@@ -171,7 +224,10 @@ async def llm_extract(
             "success_conditions": [c.model_dump(mode="json") for c in brief.success_conditions],
             "comparison": brief.comparison.model_dump(mode="json") if brief.comparison else None,
             "include_all_compared_items": brief.comparison is not None,
+            "observed_pages": [
+                {"url": page.url, "page_text": page.page_text} for page in observed_pages
+            ] if brief.comparison is not None else [],
         },
-        output_type=Extraction,
+        output_type=_ObservedExtraction,
     ), context)
     return result.value

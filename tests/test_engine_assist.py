@@ -168,13 +168,15 @@ async def test_choice_when_outside_operation_domain_is_invalid(
     operation: str, index: int | None, value: str | None,
 ) -> None:
     # Given
-    provider = Provider([json.dumps({"operation": operation, "target_index": index, "option_value": value})])
+    provider = Provider([json.dumps({"operation": operation, "target_index": index, "option_value": value})] * 2)
     scope = Scope()
     # When / Then
     with pytest.raises(LLMError) as raised:
         _ = await llm_choose(PAGE, BRIEF, provider=provider, context=scope)
     assert raised.value.kind == "invalid_output" and not raised.value.retryable
-    assert len(provider.prompts) == len(scope.records) == 1
+    attempts = 2 if operation != "select_option" and value is not None else 1
+    assert len(provider.prompts) == len(scope.records) == attempts
+    assert [record.outcome for record in scope.records[:attempts - 1]] == ["invalid_output"] * (attempts - 1)
 
 
 @pytest.mark.parametrize("choice,expected", [
@@ -224,6 +226,21 @@ async def test_choice_when_jev_domain_is_truncated_cannot_restore_an_excluded_ta
     assert [e["index"] for e in candidates["click"] if isinstance(e, dict)] == [*range(199), 200]
 
 
+@pytest.mark.parametrize("attribute", ["name", "id", "aria-label", "placeholder"])
+async def test_choice_when_typing_matches_supplied_field_identifier(attribute: str) -> None:
+    # Given
+    target = ELEMENTS[1].model_copy(update={"attributes": {attribute: "query"}})
+    page = PAGE.model_copy(update={"elements": [target]})
+    brief = BRIEF.model_copy(update={"input_values": {"query": "supplied"}})
+    provider = Provider([
+        ActionChoice(operation="type_text", target_index=7, option_value=None).model_dump_json(),
+    ])
+    # When
+    action = await llm_choose(page, brief, provider=provider, context=Scope())
+    # Then
+    assert action.target == target and action.value == "supplied"
+
+
 async def test_replan_when_applied_updates_jev_context_without_changing_original_goal() -> None:
     # Given
     original = GoalContext("original", "brief", "old", ("clicked",))
@@ -245,11 +262,19 @@ async def test_extraction_when_comparing_preserves_all_quotes_for_code_verificat
     answer: Extraction, status: str,
 ) -> None:
     # Given
-    provider = Provider([answer.model_dump_json()])
+    provider = Provider([answer.model_dump_json()] * 2)
     # When
+    if not all(
+        field.value in PAGE.page_text and field.quote in PAGE.page_text
+        for field in answer.fields.values()
+    ):
+        with pytest.raises(LLMError) as raised:
+            await llm_extract(PAGE, BRIEF, provider=provider, context=Scope())
+        assert raised.value.kind == "invalid_output" and len(provider.prompts) == 2
+        return
     result = await llm_extract(PAGE, BRIEF, provider=provider, context=Scope())
     # Then
-    assert result == answer and verify(PAGE, BRIEF, result).status == status
+    assert result.model_dump() == answer.model_dump() and verify(PAGE, BRIEF, result).status == status
     payload = TypeAdapter(dict[str, JsonValue]).validate_json(provider.prompts[0].user_text)
     assert payload["comparison"] == {"field": "price", "kind": "max"}
     assert payload["include_all_compared_items"] is True
@@ -306,3 +331,78 @@ async def test_schema_when_response_shape_is_invalid_cannot_bypass_validation(
         _ = await invoke(purpose, provider, scope)
     assert raised.value.kind == "invalid_output"
     assert [r.outcome for r in scope.records] == ["invalid_output", "invalid_output"]
+
+
+async def test_comparison_when_history_supplied_sends_observed_text_and_source_url() -> None:
+    # Given
+    previous = PAGE.model_copy(update={"url": "https://example.test/list"})
+    provider = Provider([ANSWER.model_dump_json()])
+    # When
+    await llm_extract(PAGE, BRIEF, provider=provider, context=Scope(), observed_pages=(previous,))
+    # Then
+    payload = TypeAdapter(dict[str, JsonValue]).validate_json(provider.prompts[0].user_text)
+    assert payload["observed_pages"] == [{"url": previous.url, "page_text": previous.page_text}]
+
+
+async def test_choice_when_nonselect_option_is_supplied_repairs_before_binding() -> None:
+    # Given: the live failure put generated input text in the option-only field.
+    provider = Provider([
+        '{"operation":"type_text","target_index":7,"option_value":"Riley"}',
+        '{"operation":"type_text","target_index":7,"option_value":null}',
+    ])
+    scope = Scope()
+    # When
+    action = await llm_choose(PAGE, BRIEF, provider=provider, context=scope)
+    # Then
+    assert action == BrowserAction(kind="type_text", target=ELEMENTS[1])
+    assert [record.outcome for record in scope.records] == ["invalid_output", "ok"]
+
+
+async def test_comparison_when_value_contains_name_repairs_to_numeric_field_only() -> None:
+    # Given: a descriptive label cannot be compared as a number.
+    malformed = ANSWER.model_copy(update={
+        "compared_items": [FieldValue(value="B — $20", quote="B $20")],
+    })
+    provider = Provider([malformed.model_dump_json(), ANSWER.model_dump_json()])
+    scope = Scope()
+    # When
+    result = await llm_extract(PAGE, BRIEF, provider=provider, context=scope)
+    # Then
+    assert result.model_dump() == ANSWER.model_dump()
+    assert [record.outcome for record in scope.records] == ["invalid_output", "ok"]
+
+
+@pytest.mark.parametrize("quote", ["1397 Birth date", "Birth ... 1397"])
+async def test_extraction_when_quote_reorders_or_omits_observed_text_repairs_once(quote: str) -> None:
+    # Given: the answer is visible, but the first quote is not a page substring.
+    observation = PAGE.model_copy(update={"page_text": "Birth date 1397"})
+    brief = BRIEF.model_copy(update={"comparison": None})
+    valid = Extraction(
+        fields={"year": FieldValue(value="1397", quote="Birth date 1397")},
+        no_result=False, no_result_quote=None, compared_items=[],
+    )
+    invalid = valid.model_copy(update={"fields": {"year": FieldValue(value="1397", quote=quote)}})
+    provider = Provider([invalid.model_dump_json(), valid.model_dump_json()])
+    scope = Scope()
+    # When
+    result = await llm_extract(observation, brief, provider=provider, context=scope)
+    # Then
+    assert result.model_dump() == valid.model_dump()
+    assert [record.outcome for record in scope.records] == ["invalid_output", "ok"]
+
+
+async def test_choice_when_input_already_executed_receives_history_and_length_not_text() -> None:
+    # Given: observed input values are privacy-preserving lengths, not contents.
+    filled = ELEMENTS[1].model_copy(update={"attributes": {"value": "5"}})
+    observation = PAGE.model_copy(update={"elements": [ELEMENTS[0], filled]})
+    history = ("type_text target=107 outcome=executed",)
+    provider = Provider([ActionChoice(operation="click", target_index=3, option_value=None).model_dump_json()])
+    # When
+    action = await llm_choose(
+        observation, BRIEF, provider=provider, context=Scope(), recent_actions=history,
+    )
+    # Then
+    payload = TypeAdapter(dict[str, JsonValue]).validate_json(provider.prompts[0].user_text)
+    assert payload["recent_actions"] == list(history)
+    assert payload["retained_input_lengths"] == {"7": "5"}
+    assert action == BrowserAction(kind="click", target=ELEMENTS[0])

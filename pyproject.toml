@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-jevpilot = "jevpilot.cli:entrypoint"
+jevpilot = "jevpilot.app:entrypoint"
 
 [project.optional-dependencies]
 dev = [

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 import math
@@ -15,11 +15,13 @@ import os
 import sys
 import time
 from typing import Final
+import unicodedata
 
 import httpx2
 from pydantic import JsonValue
 
-from jevpilot.browser.port import ActionKind, ElementRef, Observation
+from jevpilot.browser.port import ActionKind, BrowserAction, ElementRef, Observation
+from jevpilot.engine.candidates import build_candidates
 from jevpilot.ledger.legacy_bridge import legacy_call_context
 from jevpilot.ledger.models import CallRecord
 from jevpilot.ledger.recorder import CallScope, RunLedger
@@ -343,9 +345,18 @@ class JevSelector:
             await client.aclose()
         return parsed, usage[-1], time.monotonic() - started
 
-    async def choose(self, state: SelectorState, *, scope: CallScope) -> JevChoice:
+    async def choose(
+        self, state: SelectorState, *, scope: CallScope,
+        domains: Mapping[str, Sequence[ElementRef]] | None = None,
+    ) -> JevChoice:
+        """``domains`` fixes each target operation's candidates (kept to the sent elements)."""
         elements, truncated = select_elements(state.observation.elements)
-        by_operation = {op: _candidates(elements, op) for op in _OPERATIONS}
+        kept = {e.index for e in elements}
+        by_operation = {
+            op: _candidates(elements, op) if domains is None
+            else [e for e in domains.get(op, ()) if e.index in kept]
+            for op in _OPERATIONS
+        }
         operations = [
             op for op in _OPERATIONS if op not in _TARGET_OPERATIONS or by_operation[op]
         ] + ["done"]
@@ -411,6 +422,105 @@ class JevSelector:
             value=target.options[int(option.choice)].value, confidence=option.confidence,
             margin=option.margin, usage=usage, latency_s=latency,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class GoalContext:
+    goal: str
+    brief: str = ""
+    subgoal: str = ""
+    recent_actions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class StepSignals:
+    op_confidence: float
+    op_margin: float
+    target_confidence: float | None
+    target_margin: float | None
+    option_confidence: float | None
+    option_margin: float | None
+    candidate_count: int
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class StepDecision:
+    """``action`` is None when Jev answered done; ``bound_to`` is (snapshot_id, url, backend_node_id)."""
+
+    operation: str
+    action: BrowserAction | None
+    signals: StepSignals
+    bound_to: tuple[str, str, int | None]
+    usages: tuple[CallUsage | None, ...]
+    latency_s: float
+
+
+def _normalize(text: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
+
+
+def _exact_option(target: ElementRef, input_values: dict[str, str]) -> str | None:
+    wanted = {_normalize(v) for v in input_values.values()} - {""}
+    matched = {
+        o.value for o in target.options
+        if _normalize(o.label) in wanted or _normalize(o.value) in wanted
+    }
+    return next(iter(matched)) if len(matched) == 1 else None
+
+
+async def select_step(
+    observation: Observation, goal_context: GoalContext, input_values: dict[str, str],
+    *, selector: JevSelector, scope: CallScope,
+) -> StepDecision:
+    """One Jev step over rule-built candidates; type_text carries no value."""
+    candidates = build_candidates(observation)
+    visible = observation.model_copy(update={"elements": candidates.all_elements()})
+    state = SelectorState(
+        goal=goal_context.goal, brief=goal_context.brief, subgoal=goal_context.subgoal,
+        observation=visible, recent_actions=goal_context.recent_actions,
+    )
+    choice = await selector.choose(
+        state, scope=scope,
+        domains={op: candidates.for_operation(op) for op in _TARGET_OPERATIONS},
+    )
+    usages = [choice.usage]
+    latency = choice.latency_s
+    target: ElementRef | None = None
+    if choice.operation in _TARGET_OPERATIONS:
+        target = next(
+            (e for e in candidates.for_operation(choice.operation) if e.index == choice.target_index),
+            None,
+        )
+        if target is None:
+            raise JevUnavailable("invalid_output")
+    value: str | None = None
+    option_confidence = option_margin = None
+    if choice.operation == "select_option" and target is not None:
+        value = _exact_option(target, input_values)
+        if value is None:
+            option = await selector.choose_option(state, target, scope=scope)
+            if option.value not in {o.value for o in target.options}:
+                raise JevUnavailable("invalid_output")
+            value, option_confidence, option_margin = option.value, option.confidence, option.margin
+            usages.append(option.usage)
+            latency += option.latency_s
+    action = None if choice.operation == "done" else BrowserAction(
+        kind=choice.operation, target=target, value=value,  # pyright: ignore[reportArgumentType]
+    )
+    return StepDecision(
+        operation=choice.operation, action=action,
+        signals=StepSignals(
+            choice.op_confidence, choice.op_margin, choice.target_confidence,
+            choice.target_margin, option_confidence, option_margin,
+            choice.candidate_count, choice.truncated,
+        ),
+        bound_to=(
+            observation.snapshot_id, observation.url,
+            target.backend_node_id if target is not None else None,
+        ),
+        usages=tuple(usages), latency_s=latency,
+    )
 
 
 async def validate_key(

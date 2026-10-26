@@ -112,6 +112,12 @@ def main() -> None:
             if scenario == "crash_once" and not (home / "crashed").exists():
                 (home / "crashed").touch()
                 sys.exit(3)
+            if scenario == "schema_rpc":
+                emit({"id": request["id"], "error": {
+                    "code": -32600, "message": "private upstream details",
+                    "data": {"code": "invalid_json_schema"},
+                }})
+                continue
             notify("turn/started", {"threadId": thread, "turn": {"id": turn}})
             reply({"turn": {"id": turn, "status": "inProgress", "items": []}})
             if scenario == "cancel":
@@ -128,11 +134,27 @@ def main() -> None:
                     "error": {"codexErrorInfo": "usageLimitExceeded"},
                 }})
                 continue
+            if scenario in {"schema_notification", "http_400"}:
+                error: dict[str, JsonValue] = {
+                    "message": json.dumps({
+                        "error": {"code": "invalid_json_schema",
+                                  "message": "private upstream details"},
+                        "status": 400,
+                    }) if scenario != "http_400" else "HTTP 400 private upstream details",
+                    "codexErrorInfo": "other",
+                }
+                notify("error", {
+                    "threadId": thread, "turnId": turn, "error": error,
+                    "willRetry": False,
+                })
+                continue
             text = "{}" if scenario == "invalid" or (
                 scenario == "repair" and calls == 1
             ) else '{"answer":"2"}'
             if scenario == "text":
                 text = "2"
+            if scenario == "dynamic":
+                text = (home / "response.json").read_text()
             item_type = "commandExecution" if scenario == "tool" else "agentMessage"
             notify("item/completed", {
                 "threadId": thread, "turnId": turn,

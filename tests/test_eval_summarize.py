@@ -98,3 +98,31 @@ def test_duplicate_trial_when_resuming_is_rejected() -> None:
     # When / Then
     with pytest.raises(ValueError, match="duplicate"):
         summarize([trial, trial], [run])
+
+
+def test_integration_failure_when_recorded_is_separate_from_measured_failures(
+    tmp_path: Path,
+) -> None:
+    # Given: one ordinary failed run and one integration failure for arm A.
+    planned = [PlannedRun(arm=arm, scenario="F-02", repeat=repeat, split="dev")
+               for repeat in range(2) for arm in ("A", "B", "C", "D")]
+    trials = [Trial(
+        **run.model_dump(), status="completed", elapsed_s=1, oracle="passed",
+    ) for run in planned]
+    trials[0] = trials[0].model_copy(update={
+        "status": "integration_failed", "oracle": "unverifiable",
+        "error_kind": "agent_provider_failure",
+    })
+    trials[4] = trials[4].model_copy(update={"status": "incomplete", "oracle": "failed"})
+    # When
+    rows = summarize(trials, planned)["dev"]
+    report = write_report(tmp_path, trials, planned)
+    # Then: integration is visible but never a measured failure or missing run.
+    assert rows["A"].scheduled == rows["A"].recorded == 2
+    assert rows["A"].integration_failed == 1
+    assert rows["A"].blocked == rows["A"].unverifiable == rows["A"].missing == 0
+    assert rows["A"].evaluable.denominator == 1
+    assert rows["A"].evaluable.successes == 0
+    assert rows["B"].evaluable.denominator == 2
+    assert all(row.common.denominator == 1 for row in rows.values())
+    assert report.stat().st_size > 0

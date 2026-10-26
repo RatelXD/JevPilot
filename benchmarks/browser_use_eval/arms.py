@@ -328,6 +328,14 @@ async def execute(
                             ).run(max_steps=40)
                             target = (await session.get_or_create_cdp_session()).target_id
                             evidence = await page_evidence(await exact_page(browser, target))
+                            agent_calls = [
+                                call for call in ledger.calls if call.purpose == "agent_step"
+                            ]
+                            if agent_calls and agent_calls[-1].error_kind is not None:
+                                return ArmResult(
+                                    "integration_failed", "", evidence,
+                                    error_kind="agent_provider_failure",
+                                )
                             answer, verified = await extract(
                                 scenario, evidence, provider, ledger, deadline,
                             ) if scenario.outputs else ("", None)

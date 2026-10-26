@@ -295,6 +295,30 @@ def test_sink_persists_before_allowlisted_progress_without_payload_leak(home: Pa
     assert "synthetic-private" not in lines[0]
 
 
+def test_sink_reports_overlapping_span_intervals_from_run_origin(home: Path) -> None:
+    # Given: overlapping startup spans with a deterministic clock.
+    now = [100.0]
+    lines: list[str] = []
+    ledger = RunLedger(sink=ShellSink("timing", root=home, emit=lines.append), clock=lambda: now[0])
+    # When
+    first = ledger.open_span("observe", "browser_start")
+    now[0] = 101.0
+    second = ledger.open_span("brief")
+    now[0] = 103.0
+    ledger.close_span(second.span_id)
+    now[0] = 105.0
+    ledger.close_span(first.span_id, "failed")
+    ledger.finish()
+    # Then: identity, offsets and durations reflect spans, not print order.
+    import re
+    starts = [re.search(r"#(\d+).*시작 \+([\d.]+)초", line) for line in lines]
+    ends = [re.search(r"#(\d+).*완료 \+([\d.]+)초.*소요 ([\d.]+)초.*\((\w+)\)", line) for line in lines]
+    assert [match.groups() for match in starts if match] == [("1", "0.00"), ("2", "1.00")]
+    assert [match.groups() for match in ends if match] == [
+        ("2", "3.00", "2.00", "ok"), ("1", "5.00", "5.00", "failed"),
+    ]
+
+
 async def test_actual_bracketed_paste_reaches_shell_as_one_unchanged_goal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

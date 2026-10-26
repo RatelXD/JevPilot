@@ -134,6 +134,17 @@ def main() -> None:
                     "error": {"codexErrorInfo": "usageLimitExceeded"},
                 }})
                 continue
+            if scenario == "workspace_auth":
+                notify("error", {
+                    "threadId": thread, "turnId": turn,
+                    "error": {
+                        "message": "workspace routing discovery unauthorized (401)",
+                        "codexErrorInfo": "other", "additionalDetails": None,
+                        "misalignment": None,
+                    },
+                    "willRetry": False,
+                })
+                continue
             if scenario in {"schema_notification", "http_400"}:
                 error: dict[str, JsonValue] = {
                     "message": json.dumps({

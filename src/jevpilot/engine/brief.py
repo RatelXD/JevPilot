@@ -1,6 +1,7 @@
 """Task interpretation and evidence schemas shared with the engine's caller."""
 
 from typing import Annotated, ClassVar, Literal
+from urllib.parse import urlencode
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -89,6 +90,7 @@ class FieldValue(_Model):
 
 
 class Extraction(_Model):
+    answer_summary: str = ""
     fields: dict[str, FieldValue] = Field(json_schema_extra={"properties": {}})
     no_result: bool
     no_result_quote: str | None
@@ -128,8 +130,9 @@ async def build_brief(
             system=(
                 "Interpret the complete browser task, including every line. "
                 "Restate the goal, collect supplied inputs, required answer fields "
-                "and observable completion conditions. Never invent missing inputs "
-                "or destination URLs. Conditions describe ONLY the requested FINAL "
+                "in the user's language (unless they request another language), "
+                "and observable completion conditions. Never invent missing personal inputs "
+                "or claim facts about unvisited pages. Conditions describe ONLY the requested FINAL "
                 "state, not intermediate controls or steps. When the task asks to "
                 "open an item, result, or suggestion, use opened_target with its "
                 "literal item name alone, not a paraphrase such as a named search "
@@ -139,8 +142,11 @@ async def build_brief(
                 "after opening the destination. Use visible_text for a requested "
                 "visible outcome and answer_fields for information requests; these "
                 "tasks do not necessarily require navigation. Never invent "
-                "or claim completion. Use start_url only when supplied or unambiguous; "
-                "otherwise null. List missing inputs. Mark mutating intent and "
+                "or claim completion. Preserve a supplied start URL. Otherwise choose a "
+                "known public website or search entry suitable for the goal; choosing "
+                "where to browse is your job, not a missing user input. Use null only "
+                "if no suitable entry can be chosen. List genuinely missing user inputs. "
+                "Mark mutating intent and "
                 "multi-step tasks. For numeric comparisons identify the answer field "
                 "and max/min kind. Do not browse, execute code, or use tools."
             ),
@@ -150,13 +156,13 @@ async def build_brief(
         context,
     )
     brief = result.value
-    resolved_url = start_url or brief.start_url
+    resolved_url = start_url or brief.start_url or (
+        "https://www.bing.com/search?" + urlencode({"q": goal})
+    )
     missing = [
         name for name in brief.missing_inputs
-        if name != "start_url" or resolved_url is None
+        if name != "start_url"
     ]
-    if resolved_url is None and "start_url" not in missing:
-        missing.append("start_url")
     return TaskBrief(
         goal_restated=brief.goal_restated,
         start_url=resolved_url,

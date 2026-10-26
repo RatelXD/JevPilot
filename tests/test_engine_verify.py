@@ -66,6 +66,23 @@ def test_answer_when_quote_is_absent_from_page_fails() -> None:
     print(f"absent page quote: {result.status} ({result.reason})")
 
 
+@pytest.mark.parametrize("source,expected", [
+    ("https://example.test/done", "PASS"),
+    ("https://invented.test", "FAIL"),
+])
+def test_answer_source_must_be_the_observed_url(source: str, expected: str) -> None:
+    # Given
+    task = brief(conditions=[AnswerFields(names=["source"])])
+    answer = Extraction(
+        fields={"source": FieldValue(value=source, quote=source)},
+        no_result=False, no_result_quote=None, compared_items=[],
+    )
+    # When
+    result = verify(observation(), task, answer)
+    # Then
+    assert result.status == expected
+
+
 @pytest.mark.parametrize("value,quote", [
     ("1900", "1397년 출생"), ("", "1397년 출생"), ("1397", ""),
     (" ", "1397년 출생"), ("1397", "\n\t"),

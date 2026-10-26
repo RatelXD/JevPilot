@@ -265,13 +265,19 @@ class CodexAppServerProvider:
                     info = data.get("codexErrorInfo")
                 case _:
                     pass
+        message = error.get("message")
+        if isinstance(message, str) and re.search(r"\bunauthorized\s+\(401\)", message):
+            info = "unauthorized"
         match info:
             case "rateLimitExceeded":
                 return LLMError("rate_limited", retryable=True, message="ChatGPT rate limit reached")
             case "usageLimitExceeded":
                 return LLMError("quota_exhausted", retryable=False, message="ChatGPT quota exhausted")
             case "unauthorized":
-                return LLMError("auth_invalid", retryable=False, message="ChatGPT login expired")
+                return LLMError(
+                    "auth_invalid", retryable=False,
+                    message="ChatGPT authentication rejected; sign in again with /login",
+                )
             case _:
                 if error.get("code") == 429:
                     return LLMError("rate_limited", retryable=True, message="ChatGPT rate limit reached")

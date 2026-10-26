@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import assert_never
+from urllib.parse import parse_qs, urlparse
 
 import anyio
 import pytest
@@ -126,16 +127,24 @@ async def test_brief_when_browser_observes_concurrently_does_not_block_first_obs
 
 
 @pytest.mark.parametrize("supplied", [None, "https://explicit.test"])
-async def test_missing_start_url_when_request_also_lacks_url_needs_user(
+async def test_missing_start_url_starts_search_without_asking_for_a_url(
     supplied: str | None,
 ) -> None:
     # Given
     provider = Provider(brief(None))
     # When
-    result = await build_brief("goal", provider, Scope(), start_url=supplied)
+    result = await build_brief("세종대왕 출생일 & 출처", provider, Scope(), start_url=supplied)
     # Then
-    assert result.start_url == supplied
-    assert result.missing_inputs == (["start_url"] if supplied is None else [])
+    assert result.missing_inputs == []
+    if supplied is not None:
+        assert result.start_url == supplied
+    else:
+        assert result.start_url is not None
+        parsed = urlparse(result.start_url)
+        assert parsed.scheme == "https"
+        assert parsed.netloc == "www.bing.com"
+        assert parsed.path == "/search"
+        assert parse_qs(parsed.query) == {"q": ["세종대왕 출생일 & 출처"]}
 
 
 async def test_request_url_when_model_suggests_another_url_takes_precedence() -> None:
@@ -155,7 +164,7 @@ async def test_missing_inputs_when_model_lists_them_are_preserved_without_duplic
     # When
     result = await build_brief("goal", Provider(answer), Scope())
     # Then
-    assert result.missing_inputs == ["date", "start_url"]
+    assert result.missing_inputs == ["date"]
 
 
 async def test_supplied_url_when_model_reports_missing_url_clears_that_question() -> None:

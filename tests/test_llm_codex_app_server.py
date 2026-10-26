@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
 from jevpilot.ledger.recorder import RunLedger
 from jevpilot.llm.codex_app_server import CodexAppServerProvider, _strict_output_schema
-from jevpilot.llm.codex_exec_adapter import CodexExecProvider
+from jevpilot.llm.codex_exec_adapter import CodexExecProvider, SubscriptionScope
 from jevpilot.llm.errors import LLMError
 from jevpilot.llm.types import LLMProvider, LLMRequest, LLMUsage, ModelRef
 
@@ -235,6 +235,74 @@ async def test_missing_usage_stays_unknown(tmp_path: Path) -> None:
     assert result.usage is None
     assert ledger.calls[0].api_equivalent_usd is None
     assert ledger.calls[0].billed_usd is None
+
+
+async def test_workspace_routing_401_is_nonretryable_auth_failure(tmp_path: Path) -> None:
+    # Given: login status succeeds, but the actual request rejects authentication.
+    provider = CodexAppServerProvider(REF, command=command("workspace_auth"), codex_home=tmp_path)
+    ledger = RunLedger()
+    # When
+    try:
+        with pytest.raises(LLMError) as caught:
+            await provider.generate(request(), ledger.scope(deadline=time.monotonic() + 10))
+    finally:
+        await provider.aclose()
+    # Then
+    assert caught.value.kind == "auth_invalid"
+    assert caught.value.retryable is False
+    assert len(ledger.calls) == 1
+    assert ledger.calls[0].error_kind == "auth_invalid"
+    assert sum(entry["method"] == "turn/start" for entry in wire(tmp_path)) == 1
+    assert_reaped(tmp_path)
+
+
+async def test_extraction_wire_schema_allows_required_answers_and_observed_source(tmp_path: Path) -> None:
+    # Given: strict output must permit the answer keys, rather than only {}.
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import ValidationError
+    from jevpilot.browser.port import Observation
+    from jevpilot.engine.assist import llm_extract
+    from jevpilot.engine.brief import AnswerFields, Extraction, FieldValue, TaskBrief
+    from jevpilot.engine.verify import verify
+
+    page = Observation(
+        snapshot_id="s", url="https://example.test/task-groups", title="", tabs=[],
+        elements=[], page_text="Task groups wait for all tasks to finish.",
+        fingerprint="f", observed_at_monotonic=0,
+    )
+    brief = TaskBrief(
+        goal_restated="Explain task groups with a source", start_url=page.url,
+        input_values={}, required_outputs=[],
+        success_conditions=[AnswerFields(names=["summary", "source"])],
+        missing_inputs=[], mutating_intent=False, multi_step=False, comparison=None,
+    )
+    answer = Extraction(
+        fields={
+            "summary": FieldValue(value=page.page_text, quote=page.page_text),
+            "source": FieldValue(value=page.url, quote=page.url),
+        },
+        no_result=False, no_result_quote=None, compared_items=[],
+    )
+    (tmp_path / "response.json").write_text(answer.model_dump_json())
+    provider = CodexAppServerProvider(REF, command=command("dynamic"), codex_home=tmp_path)
+    # When
+    try:
+        result = await llm_extract(
+            page, brief, provider=provider,
+            context=SubscriptionScope(RunLedger().scope(deadline=time.monotonic() + 10)),
+        )
+    finally:
+        await provider.aclose()
+    # Then: validate against the actual transmitted schema, not a prompted fake.
+    turn, = (entry for entry in wire(tmp_path) if entry["method"] == "turn/start")
+    params = turn["params"]
+    assert isinstance(params, dict)
+    schema = params["outputSchema"]
+    assert isinstance(schema, dict)
+    Draft202012Validator(schema).validate(answer.model_dump())
+    with pytest.raises(ValidationError):
+        Draft202012Validator(schema).validate({**answer.model_dump(), "fields": {}})
+    assert verify(page, brief, result).status == "PASS"
 
 
 @pytest.mark.parametrize("transport", ["app_server", "exec"])

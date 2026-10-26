@@ -174,7 +174,10 @@ def verify(
     elif names and extraction is not None:
         if not names.issubset(extraction.fields):
             return VerifyResult("FAIL", "answer_fields_missing")
-        if not all(_grounded(field, page_text) for field in extraction.fields.values()):
+        if not all(
+            _grounded(field, page_text) or field.value == field.quote == observation.url
+            for field in extraction.fields.values()
+        ):
             return VerifyResult("FAIL", "answer_not_grounded")
         if brief.comparison is not None:
             result = _compare(brief.comparison, extraction, page_text)

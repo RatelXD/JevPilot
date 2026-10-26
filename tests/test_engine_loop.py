@@ -197,6 +197,43 @@ async def run(
 
 
 @pytest.mark.parametrize("natural", [False, True])
+@pytest.mark.parametrize("limited", [False, True])
+async def test_chosen_text_target_generates_its_missing_value_before_execution(
+    tmp_path: Path, natural: bool, limited: bool,
+) -> None:
+    # Given: Jev asks for help choosing; the chosen input has no supplied value.
+    initial = page()
+    initial = initial.model_copy(update={"elements": [
+        *initial.elements,
+        page(tag="input").elements[0].model_copy(update={"index": 2, "backend_node_id": 20}),
+    ]})
+    provider = Provider([
+        *([BRIEF.model_dump_json()] if natural else []),
+        ActionChoice(operation="type_text", target_index=2, option_value=None).model_dump_json(),
+        TextValue(value="TaskGroup", rationale="Search query").model_dump_json(),
+    ])
+    browser = Browser([initial, page("Complete")])
+    # When
+    outcome, ledger, _ = await run(
+        tmp_path, browser, provider, [Pick(confidence=0.5), Pick()],
+        goal="Finish" if natural else TASK,
+        policy=RoutingPolicy(max_llm_calls=(2 if natural else 1) if limited else 8),
+    )
+    # Then
+    if limited:
+        assert outcome.status == "incomplete" and outcome.reason == "llm_call_limit"
+        assert provider.purposes == (["brief"] if natural else []) + ["choose", "text"]
+        assert sum(call.kind == "llm" for call in ledger.calls) == (2 if natural else 1)
+        assert all(call.purpose != "text" for call in ledger.calls)
+        assert browser.actions == []
+    else:
+        assert outcome.status == "verified"
+        assert provider.purposes == (["brief"] if natural else []) + ["choose", "text"]
+        assert browser.actions[0].kind == "type_text"
+        assert browser.actions[0].value == "TaskGroup"
+
+
+@pytest.mark.parametrize("natural", [False, True])
 async def test_easy_completion_when_inputs_complete_uses_only_brief_if_natural(
     tmp_path: Path, natural: bool,
 ) -> None:

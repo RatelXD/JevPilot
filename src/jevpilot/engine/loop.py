@@ -427,6 +427,17 @@ async def run_task(
                                     observation, brief, provider=llm, context=scope(),
                                     recent_actions=goal_context.recent_actions,
                                 )
+                                if chosen.kind == "type_text" and chosen.value is None and chosen.target is not None:
+                                    safety = assess(chosen, observation)
+                                    if safety.verdict == "handoff":
+                                        await handoff(safety.reason)
+                                        chosen = None
+                                    else:
+                                        value = await llm_text(
+                                            observation, brief, chosen.target,
+                                            provider=llm, context=scope(),
+                                        )
+                                        chosen = chosen.model_copy(update={"value": value.value})
                             case "llm_replan":
                                 patch = await llm_replan(observation, goal_context, provider=llm, context=scope())
                                 goal_context = patch.apply(goal_context)

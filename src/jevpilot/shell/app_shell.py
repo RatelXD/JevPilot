@@ -87,6 +87,12 @@ async def execute_controlled(
         outcome.receipt, outcome=outcome.status, answer_summary=answer,
         evidence_quote=quote, calls=ledger.calls,
     ))
+    if outcome.status == "verified" and outcome.extraction is not None and outcome.extraction.answer_summary:
+        write_line(f"답변: {outcome.extraction.answer_summary}")
+    if outcome.extraction is not None and outcome.extraction.fields and outcome.final_url:
+        write_line(f"출처: {outcome.final_url}")
+    if outcome.reason in {"llm_auth_invalid", "llm_auth_missing"}:
+        write_line("LLM 인증이 거부되었거나 없습니다. /login으로 다시 인증하세요.")
     return outcome
 
 

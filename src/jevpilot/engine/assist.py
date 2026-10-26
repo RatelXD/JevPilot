@@ -6,7 +6,7 @@ from typing import ClassVar, Literal, Self, assert_never
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from jevpilot.browser.port import BrowserAction, ElementRef, Observation
-from jevpilot.engine.brief import Extraction, NonBlank, TaskBrief
+from jevpilot.engine.brief import AnswerFields, Extraction, FieldValue, NonBlank, TaskBrief
 from jevpilot.engine.candidates import ActionCandidates, build_candidates
 from jevpilot.engine.jev import GoalContext, select_elements
 from jevpilot.engine.verify import _grounded, _normalize, _number
@@ -190,13 +190,26 @@ async def llm_extract(
     observed_pages: tuple[Observation, ...] = (),
 ) -> Extraction:
     """Extract claims with evidence; the code-owned verifier alone decides success."""
+    names = {field.name for field in brief.required_outputs}
+    for condition in brief.success_conditions:
+        if isinstance(condition, AnswerFields):
+            names.update(condition.names)
+    if brief.comparison is not None:
+        names.add(brief.comparison.field)
+
     class _ObservedExtraction(Extraction):
         """Repair malformed claims without weakening the final verifier."""
+
+        fields: dict[str, FieldValue] = Field(json_schema_extra={
+            "properties": {name: FieldValue.model_json_schema() for name in sorted(names)},
+        })
 
         @model_validator(mode="after")
         def validate_observed_fields(self) -> Self:
             if not self.no_result and not all(
-                _grounded(field, _normalize(observation.page_text)) for field in self.fields.values()
+                _grounded(field, _normalize(observation.page_text))
+                or field.value == field.quote == observation.url
+                for field in self.fields.values()
             ):
                 raise ValueError("fields must contain values and verbatim quotes from the current page; do not reorder or omit words")
             if brief.comparison is not None and any(
@@ -217,8 +230,14 @@ async def llm_extract(
             "with its displayed currency if any; put the item name in quote, not value."
             " Compared items may quote earlier observed pages, each independently. "
             "Required answer fields must still quote the current page."
+            " Source fields may use the supplied current URL as both value and quote."
+            " Write answer_summary in the language of the user's goal, unless the goal "
+            "requests another language. Summarize only the extracted facts. Keep field "
+            "values and evidence quotes verbatim in their original language."
         ),
         user_payload={
+            "goal": brief.goal_restated,
+            "url": observation.url,
             "page_text": observation.page_text,
             "required_outputs": [f.model_dump(mode="json") for f in brief.required_outputs],
             "success_conditions": [c.model_dump(mode="json") for c in brief.success_conditions],

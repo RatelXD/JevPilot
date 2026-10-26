@@ -18,6 +18,8 @@ Images are unsupported; callers must use text observations/use_vision=False.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+import re
 import subprocess
 import sys
 import time
@@ -70,6 +72,69 @@ def _string(value: JsonValue) -> str:
             raise LLMError(
                 "invalid_output", retryable=False, message="Invalid Codex protocol identifier"
             )
+
+
+def _strict_output_schema(schema: JsonValue) -> JsonValue:
+    """Copy schemas into Codex's strict subset without changing the parse type.
+
+    Like browser-use's SchemaOptimizer, require nullable fields too and strip
+    defaults/min_items. Keep references rather than expanding recursive models.
+    Property/definition names and literal JSON values are not schema keywords.
+    """
+    result = deepcopy(schema)
+
+    def normalize(node: JsonValue) -> None:
+        match node:
+            case dict():
+                node.pop("default", None)
+                node.pop("min_items", None)
+                properties = node.get("properties")
+                if isinstance(properties, dict):
+                    node["required"] = list(properties)
+                    node["additionalProperties"] = False
+                elif node.get("type") == "object" and "additionalProperties" not in node:
+                    node["additionalProperties"] = False
+                for key, value in node.items():
+                    if key in {"properties", "$defs", "definitions", "patternProperties"}:
+                        if isinstance(value, dict):
+                            for child in value.values():
+                                normalize(child)
+                    elif key in {
+                        "items", "prefixItems", "anyOf", "oneOf", "allOf",
+                        "additionalProperties", "not", "contains",
+                    }:
+                        normalize(value)
+            case list():
+                for child in node:
+                    normalize(child)
+            case _:
+                return
+
+    normalize(result)
+    return result
+
+
+def _schema_rejection(error: JsonValue) -> bool:
+    """Recognize protocol rejection markers without exposing upstream text."""
+    match error:
+        case dict():
+            if error.get("code") in ("invalid_json_schema", 400) or error.get("status") == 400:
+                return True
+            for key in ("error", "data"):
+                if _schema_rejection(error.get(key)):
+                    return True
+            message = error.get("message")
+            if isinstance(message, str):
+                try:
+                    return _schema_rejection(_JSON.validate_json(message))
+                except ValidationError:
+                    return bool(re.search(
+                        r"\binvalid_json_schema\b|\bHTTP(?:/\d(?:\.\d)?)?\s+400\b|"
+                        r"\b400 Bad Request\b", message,
+                    ))
+            return False
+        case _:
+            return False
 
 
 class CodexAppServerProvider:
@@ -188,6 +253,11 @@ class CodexAppServerProvider:
         return message
 
     def _error(self, error: dict[str, JsonValue]) -> LLMError:
+        if _schema_rejection(error):
+            return LLMError(
+                "configuration", retryable=False,
+                message="Codex rejected the structured-output schema (HTTP 400 / invalid_json_schema)",
+            )
         info = error.get("codexErrorInfo")
         if info is None:
             match error.get("data"):
@@ -243,7 +313,7 @@ class CodexAppServerProvider:
         result = await self._request("turn/start", {
             "threadId": self._thread_id,
             "input": [{"type": "text", "text": prompt.user_text, "text_elements": []}],
-            "outputSchema": prompt.json_schema,
+            "outputSchema": _strict_output_schema(prompt.json_schema),
             "approvalPolicy": "never",
             "sandboxPolicy": {"type": "readOnly"},
             "effort": self.ref.reasoning_effort,

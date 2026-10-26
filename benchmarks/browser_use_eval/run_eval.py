@@ -249,6 +249,7 @@ def trial_metrics(run: PlannedRun, attempt: Path, status: WorkerResult, elapsed:
     recovery_count, recovery_successes = recovery_counts(recovery)
     return Trial(
         **run.model_dump(), status=status.status, oracle=status.oracle, oracle_reason=status.oracle_reason,
+        error_kind=status.error_kind,
         elapsed_s=elapsed, llm_calls=sum(c.kind == "llm" for c in calls),
         jev_calls=sum(c.kind == "jev" for c in calls),
         tokens={k: v for k, v in measures.items() if k.endswith("_tokens")},
@@ -355,7 +356,7 @@ def run_one(run: PlannedRun, campaign: Campaign, output: Path, real_home: Path) 
 
 async def worker(spec: WorkerSpec) -> int:
     from benchmarks.browser_use_eval.arms import execute, make_ledger
-    from benchmarks.browser_use_eval.oracle import grade
+    from benchmarks.browser_use_eval.oracle import Verdict, grade
     from jevpilot.llm.errors import LLMError
     from jevpilot.llm.types import ModelRef
 
@@ -364,15 +365,19 @@ async def worker(spec: WorkerSpec) -> int:
         outcome = await execute(
             spec.arm, spec.scenario, ModelRef(**spec.model.model_dump()), spec.output, ledger,
         )
-        verdict = grade(spec.scenario.scenario_id, outcome.answer, outcome.page)
+        verdict = (
+            Verdict("unverifiable", "agent_provider_failure")
+            if outcome.error_kind == "agent_provider_failure"
+            else grade(spec.scenario.scenario_id, outcome.answer, outcome.page)
+        )
         limited = next((
             call.error_kind for call in ledger.calls
             if call.error_kind in {"rate_limited", "quota_exhausted"}
         ), None)
         result = WorkerResult(
             status="provider_limited" if limited else outcome.status,
-            oracle="unverifiable" if limited else verdict.status,
-            oracle_reason=limited or verdict.reason,
+            oracle="unverifiable" if limited or outcome.error_kind == "agent_provider_failure" else verdict.status,
+            oracle_reason=limited or outcome.error_kind or verdict.reason,
             answer=outcome.answer, page=outcome.page,
             extraction_verified=outcome.extraction_verified, error_kind=outcome.error_kind,
         )
@@ -381,6 +386,7 @@ async def worker(spec: WorkerSpec) -> int:
             status="provider_limited" if error.kind in {"rate_limited", "quota_exhausted"} else "failed",
             oracle="unverifiable" if error.kind in {"rate_limited", "quota_exhausted"} else "failed",
             oracle_reason=error.kind,
+            error_kind=error.kind,
         )
     except Exception as error:  # noqa: BROAD_EXCEPT_OK - durable worker boundary, failure remains failure
         import traceback

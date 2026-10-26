@@ -1,4 +1,6 @@
 import os
+import json
+from copy import deepcopy
 import sys
 import time
 from pathlib import Path
@@ -9,7 +11,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
 from jevpilot.ledger.recorder import RunLedger
-from jevpilot.llm.codex_app_server import CodexAppServerProvider
+from jevpilot.llm.codex_app_server import CodexAppServerProvider, _strict_output_schema
 from jevpilot.llm.codex_exec_adapter import CodexExecProvider
 from jevpilot.llm.errors import LLMError
 from jevpilot.llm.types import LLMProvider, LLMRequest, LLMUsage, ModelRef
@@ -267,3 +269,129 @@ async def test_exec_invalid_text_is_not_successful_empty_output(tmp_path: Path) 
         )
     assert caught.value.kind == "invalid_output"
     assert ledger.calls[0].error_kind == "invalid_output"
+
+
+async def test_real_dynamic_agent_output_when_transmitted_is_strict_and_parses(
+    tmp_path: Path,
+) -> None:
+    # Given: the same factory and full tool registry used by browser-use Agent.
+    from browser_use.agent.views import AgentOutput
+    from browser_use.tools.service import Tools
+    from jsonschema import Draft202012Validator
+
+    output_type = AgentOutput.type_with_custom_actions(Tools().registry.create_action_model())
+    original = deepcopy(TypeAdapter(output_type).json_schema())
+    reply = output_type.model_validate({
+        "action": [{"done": {"text": "ok", "success": True}}],
+    })
+    (tmp_path / "response.json").write_text(reply.model_dump_json())
+    provider = CodexAppServerProvider(REF, command=command("dynamic"), codex_home=tmp_path)
+    ledger = RunLedger()
+    # When
+    try:
+        result = await provider.generate(
+            LLMRequest(
+                purpose="agent_step", system="Finish.", user_payload="Finish.",
+                output_type=output_type,
+            ),
+            ledger.scope(deadline=time.monotonic() + 10),
+        )
+    finally:
+        await provider.aclose()
+    # Then: inspect the real turn/start payload, not a helper-only result.
+    turns = [entry for entry in wire(tmp_path) if entry["method"] == "turn/start"]
+    assert len(turns) == 1
+    params = turns[0]["params"]
+    assert isinstance(params, dict)
+    transmitted = params["outputSchema"]
+    assert isinstance(transmitted, dict)
+    object_count = 0
+
+    def strict(node: JsonValue) -> None:
+        nonlocal object_count
+        match node:
+            case dict():
+                if node.get("type") == "object":
+                    object_count += 1
+                    properties = node.get("properties", {})
+                    assert isinstance(properties, dict)
+                    required = node.get("required", [])
+                    assert isinstance(required, list)
+                    assert set(required) == set(properties)
+                    assert node["additionalProperties"] is False
+                assert "default" not in node and "min_items" not in node
+                for child in node.values():
+                    strict(child)
+            case list():
+                for child in node:
+                    strict(child)
+            case _:
+                return
+
+    strict(transmitted)
+    assert object_count > 20
+    properties = transmitted["properties"]
+    assert isinstance(properties, dict)
+    thinking = properties["thinking"]
+    assert isinstance(thinking, dict)
+    choices = thinking["anyOf"]
+    assert isinstance(choices, list)
+    assert {"type": "null"} in choices
+    Draft202012Validator(transmitted).validate(json.loads(reply.model_dump_json()))
+    assert isinstance(result.value, output_type)
+    assert result.value.action[0].model_dump(exclude_none=True)["done"]["text"] == "ok"
+    assert TypeAdapter(output_type).json_schema() == original
+    assert ledger.calls[0].outcome == "ok"
+
+
+def test_schema_copy_when_recursive_refs_and_keyword_field_names_are_present() -> None:
+    # Given
+    schema: JsonValue = {
+        "type": "object", "properties": {
+            "default": {"anyOf": [{"$ref": "#/$defs/Node"}, {"type": "null"}], "default": None},
+            "min_items": {"type": "array", "items": {"$ref": "#/$defs/Node"}, "min_items": 1},
+        },
+        "$defs": {"Node": {
+            "type": "object", "properties": {
+                "children": {"type": "array", "items": {"$ref": "#/$defs/Node"}},
+                "choice": {"oneOf": [{"type": "null"}, {"type": "string"}]},
+            },
+        }},
+    }
+    before = deepcopy(schema)
+    # When
+    result = _strict_output_schema(schema)
+    # Then
+    assert schema == before and result is not schema
+    assert isinstance(result, dict)
+    assert result["required"] == ["default", "min_items"]
+    assert result["additionalProperties"] is False
+    definitions = result["$defs"]
+    assert isinstance(definitions, dict)
+    node = definitions["Node"]
+    assert isinstance(node, dict)
+    assert node["required"] == ["children", "choice"]
+    assert node["additionalProperties"] is False
+    assert '"$ref": "#/$defs/Node"' in json.dumps(result)
+
+
+@pytest.mark.parametrize("scenario", ["schema_rpc", "schema_notification", "http_400"])
+async def test_schema_rejection_when_nonretryable_is_sanitized_configuration(
+    tmp_path: Path, scenario: str,
+) -> None:
+    # Given
+    provider = CodexAppServerProvider(REF, command=command(scenario), codex_home=tmp_path)
+    ledger = RunLedger()
+    # When
+    try:
+        with pytest.raises(LLMError) as caught:
+            await provider.generate(request(), ledger.scope(deadline=time.monotonic() + 10))
+    finally:
+        await provider.aclose()
+    # Then
+    assert caught.value.kind == "configuration"
+    assert caught.value.retryable is False
+    assert "private upstream details" not in str(caught.value)
+    assert "private upstream details" not in repr(caught.value)
+    assert len(ledger.calls) == 1 and ledger.calls[0].error_kind == "configuration"
+    assert sum(entry["method"] == "turn/start" for entry in wire(tmp_path)) == 1

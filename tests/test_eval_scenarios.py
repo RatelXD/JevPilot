@@ -249,9 +249,12 @@ auth.write_text('refreshed-copy')
 
 
 @pytest.mark.browser
-@pytest.mark.parametrize("arm", ["A", "B", "C", "D"])
+@pytest.mark.parametrize("arm,provider_failure", [
+    ("A", False), ("A", True), ("B", False), ("C", False), ("D", False),
+])
 async def test_browser_locale_when_real_arm_launches_is_korean(
-    arm: Literal["A", "B", "C", "D"], locale_home: Path, locale_fixture_url: str,
+    arm: Literal["A", "B", "C", "D"], provider_failure: bool,
+    locale_home: Path, locale_fixture_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Given: only decisions are offline; the arm's Chrome and capture are real.
@@ -276,6 +279,14 @@ async def test_browser_locale_when_real_arm_launches_is_korean(
             pass
 
         async def run(self, **kwargs):
+            if provider_failure:
+                from jevpilot.ledger.models import CallRecord
+                ledger.record_call(CallRecord(
+                    call_id="failed-step", span_id=ledger.root_span_id, kind="llm",
+                    provider="chatgpt_subscription", auth_mode="subscription",
+                    purpose="agent_step", request_model="offline", outcome="failed",
+                    error_kind="configuration", latency_s=1,
+                ))
             return self
 
         def is_done(self) -> bool:
@@ -306,7 +317,57 @@ async def test_browser_locale_when_real_arm_launches_is_korean(
     assert result.page.viewport == ((1120, 780) if arm == "D" else (1280, 800))
     # D uses its actual native interpreter/worker and stops at the passing first
     # checkpoint, before any Jev or subscription request.
-    assert ledger.calls == []
+    if provider_failure:
+        assert result.status == "integration_failed"
+        assert result.error_kind == "agent_provider_failure"
+        assert len(ledger.calls) == 1
+    else:
+        assert result.error_kind is None
+        assert ledger.calls == []
+
+
+async def test_worker_when_agent_provider_failure_preserves_integration_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: retain worker persistence and trial conversion, substitute browser work.
+    from benchmarks.browser_use_eval import arms, oracle
+    from benchmarks.browser_use_eval.oracle import PageEvidence
+    from benchmarks.browser_use_eval.summarize import PlannedRun
+    from benchmarks.browser_use_eval.scenarios import Scenario
+    from jevpilot.ledger.recorder import RunLedger
+    from jevpilot.llm.types import ModelRef
+
+    async def execute(
+        _arm: arms.Arm, _scenario: Scenario, _ref: ModelRef,
+        _output: Path, _ledger: RunLedger,
+    ) -> arms.ArmResult:
+        return arms.ArmResult(
+            "integration_failed", "", PageEvidence("", ""),
+            error_kind="agent_provider_failure",
+        )
+
+    def reject_grade(_scenario_id: str, _answer: str, _page: PageEvidence) -> oracle.Verdict:
+        pytest.fail("integration failures are not graded")
+
+    monkeypatch.setattr(arms, "execute", execute)
+    monkeypatch.setattr(oracle, "grade", reject_grade)
+    spec = run_eval.WorkerSpec(
+        arm="A", scenario=Scenario(
+            scenario_id="F-02", goal="Filter", start_url="http://127.0.0.1/filter.html",
+            split="dev",
+        ), model=ModelSpec(model_id="offline"), output=tmp_path,
+    )
+    # When
+    assert await run_eval.worker(spec) == 0
+    result = run_eval.WorkerResult.model_validate_json((tmp_path / "result.json").read_bytes())
+    trial = run_eval.trial_metrics(
+        PlannedRun(arm="A", scenario="F-02", repeat=0, split="dev"),
+        tmp_path, result, 1, True,
+    )
+    # Then
+    assert result.status == trial.status == "integration_failed"
+    assert result.oracle == trial.oracle == "unverifiable"
+    assert result.error_kind == trial.error_kind == "agent_provider_failure"
 
 
 @pytest.fixture

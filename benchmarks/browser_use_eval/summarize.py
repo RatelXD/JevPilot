@@ -26,6 +26,7 @@ class Trial(BaseModel):
     status: str
     oracle: Literal["passed", "failed", "blocked", "unverifiable"]
     oracle_reason: str = ""
+    error_kind: str | None = None
     elapsed_s: float
     llm_calls: int = 0
     jev_calls: int = 0
@@ -66,6 +67,7 @@ class ArmSummary(BaseModel):
     recorded: int
     blocked: int
     unverifiable: int
+    integration_failed: int
     missing: int
     evaluable: Rate
     common: Rate
@@ -112,7 +114,10 @@ def summarize(trials: list[Trial], planned: list[PlannedRun]) -> dict[str, dict[
     expected = {(p.split, p.scenario, p.repeat, p.arm) for p in planned}
     if not set(keys) <= expected:
         raise ValueError("unplanned trial")
-    evaluable = [t for t in trials if t.oracle not in {"blocked", "unverifiable"}]
+    evaluable = [
+        t for t in trials if t.oracle not in {"blocked", "unverifiable"}
+        and t.error_kind != "agent_provider_failure"
+    ]
     groups: dict[tuple[str, str, int], set[str]] = defaultdict(set)
     for trial in evaluable:
         groups[(trial.split, trial.scenario, trial.repeat)].add(trial.arm)
@@ -130,7 +135,11 @@ def summarize(trials: list[Trial], planned: list[PlannedRun]) -> dict[str, dict[
             result[split][arm] = ArmSummary(
                 scheduled=scheduled, recorded=len(rows), missing=scheduled - len(rows),
                 blocked=sum(t.oracle == "blocked" for t in rows),
-                unverifiable=sum(t.oracle == "unverifiable" for t in rows),
+                unverifiable=sum(
+                    t.oracle == "unverifiable" and t.error_kind != "agent_provider_failure"
+                    for t in rows
+                ),
+                integration_failed=sum(t.error_kind == "agent_provider_failure" for t in rows),
                 evaluable=rate(sum(t.oracle == "passed" for t in eligible), len(eligible)),
                 common=rate(sum(t.oracle == "passed" for t in shared), len(shared)),
                 median_s=median(times) if times else None,
@@ -157,7 +166,8 @@ def write_report(output: Path, trials: list[Trial], planned: list[PlannedRun]) -
     lines = [
         "# Browser-use evaluation", "",
         "Rates use evaluable runs and the common (scenario, repeat) set where all four arms "
-        "are evaluable. Missing, blocked and unverifiable runs remain in scheduled counts. "
+        "are evaluable. Missing, blocked, unverifiable and integration-failed runs remain in scheduled counts. "
+        "Integration failures are excluded from measured completion rates. "
         "Intervals are Wilson 95%. Times use evaluable runs (including failures); IQR uses inclusive quartiles. "
         "A recovery succeeds when execution resumes or the run verifies before the next failure.",
         "", "A and D have no risky-action guard. D retains the native 1120x780 viewport and "
@@ -186,13 +196,13 @@ def write_report(output: Path, trials: list[Trial], planned: list[PlannedRun]) -
     for split, arms in summaries.items():
         lines.extend([
             f"## {split}", "",
-            "| Arm | Scheduled | Recorded | Blocked | Unverifiable | Missing | Evaluable completion (95%) | Common completion (95%) | Median s | IQR s | LLM | Jev | Recovery |",
-            "|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---|",
+            "| Arm | Scheduled | Recorded | Blocked | Unverifiable | Integration failures | Missing | Evaluable completion (95%) | Common completion (95%) | Median s | IQR s | LLM | Jev | Recovery |",
+            "|---|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---|",
         ])
         for arm, row in arms.items():
             lines.append(
                 f"| {arm} | {row.scheduled} | {row.recorded} | {row.blocked} | {row.unverifiable} | "
-                f"{row.missing} | {format_rate(row.evaluable)} | {format_rate(row.common)} | "
+                f"{row.integration_failed} | {row.missing} | {format_rate(row.evaluable)} | {format_rate(row.common)} | "
                 f"{row.median_s} | {row.iqr_s} | {row.llm_calls} | {row.jev_calls} | {format_rate(row.recovery)} |"
             )
         for arm, row in arms.items():
